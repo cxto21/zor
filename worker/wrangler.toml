@@ -9,13 +9,13 @@ id = "a7462b9e44c241fe830333d45cb1954c"
 
 [vars]
 STARKNET_RPC_URL = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/alch_-87xFRsdib2F_f-o2GBMV"
-STRK20_CONTRACT_ADDRESS = "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91"
+STRK20_CONTRACT_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
 PROXY_WALLET_ADDRESS = "0x6bac485e95d541c9d3e5bed098b47d137143a6a9e51d62b4e3ba31249d9700bd"
 PRICE_PER_MINUTE = "0.001"
 ALLOWED_ORIGIN = "*"
 
 [env.production]
-vars = { STARKNET_RPC_URL = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/alch_-87xFRsdib2F_f-o2GBMV", STRK20_CONTRACT_ADDRESS = "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91", PROXY_WALLET_ADDRESS = "0x6bac485e95d541c9d3e5bed098b47d137143a6a9e51d62b4e3ba31249d9700bd", PRICE_PER_MINUTE = "0.001", ALLOWED_ORIGIN = "https://zor-frontend.pages.dev" }
+vars = { STARKNET_RPC_URL = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/alch_-87xFRsdib2F_f-o2GBMV", STRK20_CONTRACT_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d", PROXY_WALLET_ADDRESS = "0x6bac485e95d541c9d3e5bed098b47d137143a6a9e51d62b4e3ba31249d9700bd", PRICE_PER_MINUTE = "0.001", ALLOWED_ORIGIN = "https://zor-frontend.pages.dev" }
 
 [[env.production.kv_namespaces]]
 binding = "SESSIONS"

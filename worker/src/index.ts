@@ -247,7 +247,8 @@ async function verifyTransaction(
 
     if (
       receipt.finality_status !== "ACCEPTED_ON_L1" &&
-      receipt.finality_status !== "ACCEPTED_ON_L2"
+      receipt.finality_status !== "ACCEPTED_ON_L2" &&
+      receipt.finality_status !== "PRE_CONFIRMED"
     ) {
       return {
         valid: false,
