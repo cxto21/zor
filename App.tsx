@@ -142,22 +142,64 @@ const App: React.FC = () => {
       const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
       const amountHigh = amountWei >> BigInt(128);
 
-      // Send STRK to the deposit address
-      const result = await account.execute({
-        contractAddress: STRK20_CONTRACT,
-        entrypoint: 'transfer',
-        calldata: [
-          depositAddress,
-          '0x' + amountLow.toString(16),
-          '0x' + amountHigh.toString(16),
-        ]
-      });
+      // Try V1 transaction first (more compatible with Argent on Sepolia)
+      let result: any = null;
+      let lastError: any = null;
+
+      // Attempt 1: V1 with maxFee
+      try {
+        result = await account.execute(
+          {
+            contractAddress: STRK20_CONTRACT,
+            entrypoint: 'transfer',
+            calldata: [
+              depositAddress,
+              '0x' + amountLow.toString(16),
+              '0x' + amountHigh.toString(16),
+            ]
+          },
+          { version: 0x1, maxFee: '0x1600000' }  // ~0.024 STRK max fee
+        );
+      } catch (e1) {
+        lastError = e1;
+        console.warn('V1 tx failed, trying V3 with explicit bounds:', e1);
+
+        // Attempt 2: V3 with explicit resource bounds
+        try {
+          result = await account.execute(
+            {
+              contractAddress: STRK20_CONTRACT,
+              entrypoint: 'transfer',
+              calldata: [
+                depositAddress,
+                '0x' + amountLow.toString(16),
+                '0x' + amountHigh.toString(16),
+              ]
+            },
+            {
+              version: 0x3,
+              resourceBounds: {
+                l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
+                l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
+                l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
+              }
+            }
+          );
+        } catch (e2) {
+          lastError = e2;
+          console.warn('V3 with bounds also failed:', e2);
+        }
+      }
+
+      if (!result) {
+        throw lastError || new Error('Failed to send transaction');
+      }
 
       const txHash = result.transaction_hash;
-      setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for balance...`);
+      setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for confirmation...`);
 
-      // Wait a bit for the tx to be indexed
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      // Wait for tx to be indexed
+      await new Promise(resolve => setTimeout(resolve, 8000));
 
       // Now activate
       setPayStep('funded');
@@ -182,14 +224,14 @@ const App: React.FC = () => {
         localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
       } else {
         setPayStep('deposit');
-        setStatus(`ACTIVATION FAILED: ${activation.error || 'Balance not yet available. Try again in a few seconds.'}`);
+        setStatus(`ACTIVATION FAILED: ${activation.error || 'Balance not yet available. Try "I sent it manually".'}`);
       }
     } catch (error: any) {
       const msg = error?.message || String(error);
       if (msg.includes('user declined') || msg.includes('user rejected')) {
         setStatus('Payment cancelled by user.');
       } else {
-        setStatus(`TX ERROR: ${msg}`);
+        setStatus(`TX FAILED — use "I sent it manually": ${msg.slice(0, 80)}`);
       }
       setPayStep('deposit');
     } finally {
@@ -197,10 +239,10 @@ const App: React.FC = () => {
     }
   };
 
-  // Manual "I've sent it" fallback
+  // Manual "I've sent it" — show retry activate button
   const handleFunded = () => {
     setPayStep('funded');
-    setStatus('Verifying balance on-chain...');
+    setStatus('Click "Verify & Activate" once your TX is confirmed on Starknet.');
   };
 
   // Step 3: Activate session after funding
@@ -450,6 +492,40 @@ const App: React.FC = () => {
 
           <p className="text-[9px] text-gray-500">
             Click the button above to send from your connected wallet, or send manually and click "I've sent it".
+          </p>
+        </div>
+      )}
+
+      {/* FUNDED — waiting for balance confirmation */}
+      {!hasActiveSession && payStep === 'funded' && depositAddress && (
+        <div className="retro-border p-3 bg-blue-50 space-y-3 border-2 border-blue-400">
+          <h4 className="font-bold text-xs uppercase text-blue-800">⏳ Waiting for balance confirmation</h4>
+          <div className="retro-border-inset p-2 bg-white">
+            <div className="text-[10px] font-bold uppercase mb-1">Deposit Address:</div>
+            <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">
+              {depositAddress}
+            </div>
+          </div>
+          <p className="text-[10px] text-gray-600">
+            If you haven't sent yet, send <span className="font-bold">{depositAmount} STRK</span> to the address above.
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={handleActivate}
+              disabled={isLoading}
+              className="retro-border retro-button bg-green-600 text-white px-6 py-2 text-xs font-bold uppercase flex-1 disabled:opacity-50"
+            >
+              {isLoading ? 'CHECKING...' : '✓ VERIFY & ACTIVATE'}
+            </button>
+            <button
+              onClick={handleCancelPay}
+              className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase"
+            >
+              CANCEL
+            </button>
+          </div>
+          <p className="text-[9px] text-gray-500">
+            Click "Verify & Activate" once your TX is confirmed on Starknet (usually ~30s).
           </p>
         </div>
       )}
