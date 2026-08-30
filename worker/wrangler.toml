@@ -16,4 +16,4 @@ ALLOWED_ORIGIN = "*"
 
 [env.production]
 STARKNET_RPC_URL = "https://starknet-sepolia.g.alchemy.com/starknet/version/rpc/v0_10/alch_-87xFRsdib2F_f-o2GBMV"
-ALLOWED_ORIGIN = "https://zor-proxy.pages.dev"
+ALLOWED_ORIGIN = "https://zor-frontend.pages.dev"
