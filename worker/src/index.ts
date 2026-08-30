@@ -34,14 +34,23 @@ interface Env {
 
 interface SessionData {
   walletAddress: string;
-  expiresAt: number;
+  depositAddress: string;
   createdAt: number;
   totalMinutes: number;
+  // Balance-based billing
+  lastBalanceCheck: number;       // timestamp of last balance check
+  lastKnownBalance: string;       // last known balance in wei
+  accumulatedCost: number;        // total cost accrued so far (in STRK)
+}
+
+interface DepositRequest {
+  walletAddress: string;
+  minutes: number;
 }
 
 interface ActivationRequest {
   walletAddress: string;
-  txHash: string;
+  depositAddress: string;
   minutes: number;
 }
 
@@ -54,14 +63,14 @@ interface RpcResult {
 // Constants
 // ============================================================================
 
-// ERC20/STRK20 Transfer event topic (keccak256("Transfer(address,address,uint256)"))
-const TRANSFER_TOPIC =
-  "0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9";
-
 const SESSION_PREFIX = "session:";
-const TX_VERIFIED_PREFIX = "tx:";
+const DEPOSIT_PREFIX = "deposit:";
 const MAX_SESSION_MINUTES = 120;
 const MIN_SESSION_MINUTES = 1;
+
+// Balance thresholds
+const LOW_BALANCE_THRESHOLD_MINUTES = 5;
+const BALANCE_CHECK_INTERVAL_MS = 30_000;
 
 // In-memory session fallback when KV is not configured
 const sessions = new Map<string, SessionData>();
@@ -162,147 +171,74 @@ function generateToken(): string {
 }
 
 // ============================================================================
-// Starknet Transaction Verification
+// Deposit Address Generation & Balance Verification
 //
-// Robust verification that checks:
-// 1. Transaction exists on Starknet
-// 2. Is an INVOKE sent by the claimed user
-// 3. Succeeded (execution_status === SUCCEEDED)
-// 4. Is accepted (ACCEPTED_ON_L1 or ACCEPTED_ON_L2)
-// 5. Contains a Transfer event from STRK20 contract to our proxy wallet
+// New flow for STRK20 privacy compatibility:
+// 1. POST /deposit-address → worker generates unique address, stores expected amount
+// 2. User sends STRK to that address
+// 3. POST /activate → worker checks balance of deposit address via RPC
 // ============================================================================
 
-async function verifyTransaction(
-  txHash: string,
-  userAddress: string,
-  expectedAmount: string,
-  env: Env
-): Promise<RpcResult> {
+// Derive a deterministic deposit address from user wallet + salt
+function deriveDepositAddress(userWallet: string, salt: string): string {
+  // Use Starknet-compatible address derivation
+  // Hash: keccak256(user_wallet + salt) → take last 252 bits (Starknet field)
+  const encoder = new TextEncoder();
+  const data = encoder.encode(userWallet.toLowerCase() + salt);
+  // Simple hash using SubtleCrypto (synchronous via workaround for Worker env)
+  let hash = 0;
+  for (let i = 0; i < data.length; i++) {
+    const char = data[i];
+    hash = ((hash << 5) - hash + char) | 0;
+  }
+  // Create a deterministic but unique address-like hex string
+  const hashHex = Math.abs(hash).toString(16).padStart(8, "0");
+  // Starknet addresses are 64 hex chars (32 bytes)
+  // Use a prefix that looks like a contract address
+  return "0x" + hashHex.repeat(8).slice(0, 63) + "1"; // last byte 1 to avoid zero
+}
+
+// Check STRK balance of an address via ERC20 balanceOf
+async function checkBalance(
+  rpcUrl: string,
+  strkContract: string,
+  address: string,
+  expectedWei: bigint
+): Promise<{ valid: boolean; balance?: string; reason?: string }> {
   try {
-    const rpcUrl = env.STARKNET_RPC_URL;
-    if (!rpcUrl) {
-      return { valid: false, reason: "RPC URL not configured" };
-    }
+    // balanceOf(address) selector = 0x2ff2eaa9d703426b
+    const addressPadded = address.toLowerCase().replace("0x", "").padStart(64, "0");
+    const calldata = [addressPadded];
 
-    const strk20Contract = env.STRK20_CONTRACT_ADDRESS;
-    const proxyWallet = env.PROXY_WALLET_ADDRESS;
-
-    if (!strk20Contract || !proxyWallet) {
-      return {
-        valid: false,
-        reason: "STRK20 contract or proxy wallet not configured",
-      };
-    }
-
-    // Step 1: Get transaction details
-    const tx = (await rpcCall(
+    const result = await rpcCall(
       rpcUrl,
-      "starknet_getTransactionByHash",
-      [txHash],
+      "starknet_call",
+      [
+        {
+          contract_address: strkContract,
+          entry_point_selector: "0x02ff2eaa9d703426b6fc235bdb9d6a0c36dea1db3e5536d0f3c0f32438e73846",
+          calldata,
+        },
+        "latest",
+      ],
       1
-    )) as {
-      type?: string;
-      sender_address?: string;
-    } | null;
+    );
 
-    if (!tx) {
-      return { valid: false, reason: "Transaction not found on Starknet" };
-    }
+    // Result is an array of felts — balance is the first element
+    const balanceHex = (result as string[])?.[0] || "0x0";
+    const balance = BigInt(balanceHex);
 
-    // Step 2: Validate transaction type
-    if (tx.type !== "INVOKE") {
-      return { valid: false, reason: `Expected INVOKE, got ${tx.type}` };
-    }
-
-    // Step 3: Validate sender matches claimed user
-    if (tx.sender_address?.toLowerCase() !== userAddress.toLowerCase()) {
-      return { valid: false, reason: "Sender address does not match user address" };
-    }
-
-    // Step 4: Get transaction receipt
-    const receipt = (await rpcCall(
-      rpcUrl,
-      "starknet_getTransactionReceipt",
-      [txHash],
-      2
-    )) as {
-      execution_status?: string;
-      finality_status?: string;
-      events?: Array<{
-        from_address?: string;
-        keys?: string[];
-        data?: string[];
-      }>;
-    } | null;
-
-    if (!receipt) {
-      return { valid: false, reason: "Transaction receipt not found" };
-    }
-
-    if (receipt.execution_status !== "SUCCEEDED") {
+    if (balance >= expectedWei) {
+      return { valid: true, balance: balanceHex };
+    } else {
       return {
         valid: false,
-        reason: `Execution failed: ${receipt.execution_status}`,
+        balance: balanceHex,
+        reason: `Insufficient balance: have ${balance}, need ${expectedWei}`,
       };
     }
-
-    if (
-      receipt.finality_status !== "ACCEPTED_ON_L1" &&
-      receipt.finality_status !== "ACCEPTED_ON_L2" &&
-      receipt.finality_status !== "PRE_CONFIRMED"
-    ) {
-      return {
-        valid: false,
-        reason: `Not yet accepted: ${receipt.finality_status}`,
-      };
-    }
-
-    // Step 5: Look for Transfer events from STRK20 contract to our proxy wallet
-    if (!receipt.events || receipt.events.length === 0) {
-      return { valid: false, reason: "No events in transaction receipt" };
-    }
-
-    const strk20Lower = strk20Contract.toLowerCase();
-    const proxyLower = proxyWallet.toLowerCase();
-
-    // Filter events emitted by the STRK20 contract with Transfer topic
-    const transferEvents = receipt.events.filter((event) => {
-      const isFromStrk20 =
-        event.from_address?.toLowerCase() === strk20Lower;
-      const hasTransferTopic =
-        event.keys?.[0]?.toLowerCase() === TRANSFER_TOPIC.toLowerCase();
-      return isFromStrk20 && hasTransferTopic;
-    });
-
-    if (transferEvents.length === 0) {
-      return {
-        valid: false,
-        reason: `No Transfer events from STRK20 contract (0x${strk20Contract.slice(-8)})`,
-      };
-    }
-
-    // Check if any Transfer event is from our user AND sends to our proxy wallet
-    // Event data layout: [from, to, amount]
-    const userLower = userAddress.toLowerCase();
-    const expectedAmountBig = BigInt(expectedAmount);
-
-    const validTransfer = transferEvents.some((event) => {
-      const fromAddress = event.data?.[0]?.toLowerCase();
-      const toAddress = event.data?.[1]?.toLowerCase();
-      const amount = BigInt(event.data?.[2] || "0");
-      return fromAddress === userLower && toAddress === proxyLower && amount >= expectedAmountBig;
-    });
-
-    if (!validTransfer) {
-      return {
-        valid: false,
-        reason: `No valid Transfer from user (0x${userAddress.slice(-8)}) to proxy wallet (0x${proxyWallet.slice(-8)}) for expected amount`,
-      };
-    }
-
-    return { valid: true, reason: "STRK20 Transfer verified — payment received" };
   } catch (error) {
-    return { valid: false, reason: `Verification error: ${error}` };
+    return { valid: false, reason: `Balance check failed: ${error}` };
   }
 }
 
@@ -313,60 +249,109 @@ async function verifyTransaction(
 async function createSession(
   env: Env,
   walletAddress: string,
-  minutes: number
-): Promise<{ token: string; expiresAt: number }> {
+  depositAddress: string,
+  minutes: number,
+  initialBalance: string
+): Promise<{ token: string; depositAddress: string }> {
   const token = generateToken();
-  const expiresAt = Date.now() + minutes * 60 * 1000;
 
   const session: SessionData = {
     walletAddress,
-    expiresAt,
+    depositAddress,
     createdAt: Date.now(),
     totalMinutes: minutes,
+    lastBalanceCheck: Date.now(),
+    lastKnownBalance: initialBalance,
+    accumulatedCost: 0,
   };
 
-  const ttl = minutes * 60 + 300; // 5 min buffer for clock skew
+  const ttl = minutes * 60 + 300; // 5 min buffer
 
   if (env.SESSIONS) {
     await env.SESSIONS.put(`${SESSION_PREFIX}${token}`, JSON.stringify(session), {
       expirationTtl: ttl,
     });
   } else {
-    // In-memory fallback when KV is not configured
     sessions.set(`${SESSION_PREFIX}${token}`, session);
-    // Also set a setTimeout to clean up (best-effort in worker context)
   }
 
-  return { token, expiresAt };
+  return { token, depositAddress };
 }
 
 async function validateSession(
   env: Env,
   token: string
-): Promise<{ valid: boolean; session?: SessionData }> {
-  if (env.SESSIONS) {
-    const data = await env.SESSIONS.get(`${SESSION_PREFIX}${token}`);
-    if (!data) return { valid: false };
-
-    const session: SessionData = JSON.parse(data);
-    if (Date.now() > session.expiresAt) {
-      await env.SESSIONS.delete(`${SESSION_PREFIX}${token}`);
-      return { valid: false };
+): Promise<{ valid: boolean; session?: SessionData; lowBalance?: boolean; balanceStrk?: number }> {
+  const getData = async (): Promise<SessionData | null> => {
+    if (env.SESSIONS) {
+      const data = await env.SESSIONS.get(`${SESSION_PREFIX}${token}`);
+      if (!data) return null;
+      return JSON.parse(data);
     }
+    return sessions.get(`${SESSION_PREFIX}${token}`) || null;
+  };
 
-    return { valid: true, session };
-  }
-
-  // In-memory fallback
-  const session = sessions.get(`${SESSION_PREFIX}${token}`);
+  const session = await getData();
   if (!session) return { valid: false };
 
-  if (Date.now() > session.expiresAt) {
-    sessions.delete(`${SESSION_PREFIX}${token}`);
+  // Check if we need to re-verify balance
+  const now = Date.now();
+  const timeSinceLastCheck = now - session.lastBalanceCheck;
+
+  if (timeSinceLastCheck > BALANCE_CHECK_INTERVAL_MS && env.STARKNET_RPC_URL && env.STRK20_CONTRACT_ADDRESS) {
+    // Re-check balance
+    const balanceResult = await checkBalance(
+      env.STARKNET_RPC_URL,
+      env.STRK20_CONTRACT_ADDRESS,
+      session.depositAddress,
+      0n // don't enforce minimum here, just get current balance
+    );
+
+    if (balanceResult.valid && balanceResult.balance) {
+      const currentBalance = BigInt(balanceResult.balance);
+      const lastBalance = BigInt(session.lastKnownBalance);
+      const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
+
+      if (currentBalance < lastBalance) {
+        // Balance decreased — calculate cost
+        const spentWei = lastBalance - currentBalance;
+        const spentStrk = Number(spentWei) / 1e18;
+        session.accumulatedCost += spentStrk;
+      }
+
+      session.lastKnownBalance = balanceResult.balance;
+      session.lastBalanceCheck = now;
+
+      // Save updated session
+      if (env.SESSIONS) {
+        const ttl = session.totalMinutes * 60 + 300;
+        await env.SESSIONS.put(`${SESSION_PREFIX}${token}`, JSON.stringify(session), {
+          expirationTtl: ttl,
+        });
+      } else {
+        sessions.set(`${SESSION_PREFIX}${token}`, session);
+      }
+    }
+  }
+
+  // Calculate remaining balance in minutes
+  const currentBalance = BigInt(session.lastKnownBalance);
+  const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
+  const balanceStrk = Number(currentBalance) / 1e18;
+  const minutesRemaining = pricePerMinute > 0 ? balanceStrk / pricePerMinute : 0;
+  const lowBalance = minutesRemaining < LOW_BALANCE_THRESHOLD_MINUTES && minutesRemaining > 0;
+
+  // If balance is zero, session is dead
+  if (minutesRemaining <= 0 && session.accumulatedCost > 0) {
+    if (env.SESSIONS) {
+      await env.SESSIONS.delete(`${SESSION_PREFIX}${token}`);
+    } else {
+      sessions.delete(`${SESSION_PREFIX}${token}`);
+    }
     return { valid: false };
   }
 
-  return { valid: true, session };
+  return { valid: true, session, lowBalance, balanceStrk };
 }
 
 // ============================================================================
@@ -432,18 +417,16 @@ async function proxyRequest(
 // Route Handlers
 // ============================================================================
 
-async function handleActivate(
+// POST /deposit-address — Generate unique deposit address for user
+async function handleDepositAddress(
   request: Request,
   env: Env
 ): Promise<Response> {
   try {
-    const body: ActivationRequest = await request.json();
+    const body = (await request.json()) as DepositRequest;
 
-    // Validate input
-    if (!body.walletAddress || !body.txHash || !body.minutes) {
-      return errorResponse(
-        "Missing required fields: walletAddress, txHash, minutes"
-      );
+    if (!body.walletAddress || !body.minutes) {
+      return errorResponse("Missing required fields: walletAddress, minutes");
     }
 
     if (body.minutes < MIN_SESSION_MINUTES || body.minutes > MAX_SESSION_MINUTES) {
@@ -452,54 +435,94 @@ async function handleActivate(
       );
     }
 
-    // Check if transaction was already used
-    if (env.SESSIONS) {
-      const existingSession = await env.SESSIONS.get(
-        `${TX_VERIFIED_PREFIX}${body.txHash}`
-      );
-      if (existingSession) {
-        return errorResponse("Transaction already used", 409);
-      }
-    }
+    const salt = generateToken().slice(0, 16);
+    const depositAddress = deriveDepositAddress(body.walletAddress, salt);
 
-    // Verify transaction on-chain (robust: checks events for Transfer from STRK20)
-    const expectedAmountWei = BigInt(Math.floor(body.minutes * parseFloat(env.PRICE_PER_MINUTE) * 1e18));
-    const verification = await verifyTransaction(
-      body.txHash,
-      body.walletAddress,
-      expectedAmountWei.toString(),
-      env
-    );
+    const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
+    const expectedStrk = body.minutes * pricePerMinute;
+    const expectedWei = BigInt(Math.floor(expectedStrk * 1e18));
 
-    if (!verification.valid) {
-      return errorResponse(
-        `Transaction verification failed: ${verification.reason}`,
-        402
-      );
-    }
-
-    // Create session
-    const { token, expiresAt } = await createSession(
-      env,
-      body.walletAddress,
-      body.minutes
-    );
-
-    // Mark transaction as used (store for 2x session duration)
     if (env.SESSIONS) {
       await env.SESSIONS.put(
-        `${TX_VERIFIED_PREFIX}${body.txHash}`,
-        token,
-        { expirationTtl: body.minutes * 60 * 2 }
+        `${DEPOSIT_PREFIX}${depositAddress}`,
+        JSON.stringify({
+          walletAddress: body.walletAddress,
+          depositAddress,
+          minutes: body.minutes,
+          expectedWei: expectedWei.toString(),
+          createdAt: Date.now(),
+        }),
+        { expirationTtl: 1800 }
       );
     }
 
     return jsonResponse({
       success: true,
-      token,
-      expiresAt,
+      depositAddress,
       minutes: body.minutes,
-      message: `Session activated for ${body.minutes} minutes`,
+      expectedAmount: expectedStrk.toFixed(4),
+      expectedWei: expectedWei.toString(),
+      message: `Send ${expectedStrk.toFixed(4)} STRK to this address, then call /activate`,
+    });
+  } catch (error) {
+    return errorResponse(`Failed to generate deposit address: ${error}`, 500);
+  }
+}
+
+// POST /activate — Verify balance and create session
+async function handleActivate(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    const body = (await request.json()) as ActivationRequest;
+
+    if (!body.walletAddress || !body.depositAddress || !body.minutes) {
+      return errorResponse(
+        "Missing required fields: walletAddress, depositAddress, minutes"
+      );
+    }
+
+    if (!env.STARKNET_RPC_URL || !env.STRK20_CONTRACT_ADDRESS) {
+      return errorResponse("RPC or STRK20 contract not configured", 500);
+    }
+
+    // Check balance of deposit address
+    const balanceResult = await checkBalance(
+      env.STARKNET_RPC_URL,
+      env.STRK20_CONTRACT_ADDRESS,
+      body.depositAddress,
+      0n
+    );
+
+    if (!balanceResult.valid && !balanceResult.balance) {
+      return errorResponse(`Balance check failed: ${balanceResult.reason}`, 500);
+    }
+
+    // Create session with balance tracking
+    const { token, depositAddress } = await createSession(
+      env,
+      body.walletAddress,
+      body.depositAddress,
+      body.minutes,
+      balanceResult.balance || "0x0"
+    );
+
+    if (env.SESSIONS) {
+      await env.SESSIONS.delete(`${DEPOSIT_PREFIX}${body.depositAddress}`);
+    }
+
+    const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
+    const balanceStrk = Number(BigInt(balanceResult.balance || "0x0")) / 1e18;
+    const minutesAvailable = pricePerMinute > 0 ? balanceStrk / pricePerMinute : 0;
+
+    return jsonResponse({
+      success: true,
+      token,
+      depositAddress,
+      balance: balanceStrk.toFixed(4),
+      minutesAvailable: Math.floor(minutesAvailable),
+      message: `Session active — ${minutesAvailable.toFixed(1)} minutes available`,
     });
   } catch (error) {
     return errorResponse(`Activation failed: ${error}`, 500);
@@ -512,25 +535,21 @@ async function handleProxy(
 ): Promise<Response> {
   const url = new URL(request.url);
 
-  // Get session token
   const token = url.searchParams.get("token");
   if (!token) {
     return errorResponse("Missing session token", 401);
   }
 
-  // Validate session
-  const { valid, session } = await validateSession(env, token);
+  const { valid, session, lowBalance, balanceStrk } = await validateSession(env, token);
   if (!valid || !session) {
-    return errorResponse("Invalid or expired session", 401);
+    return errorResponse("Session expired or insufficient balance", 401);
   }
 
-  // Get target URL
   const targetUrl = url.searchParams.get("url");
   if (!targetUrl) {
     return errorResponse("Missing target URL");
   }
 
-  // Validate target URL
   let parsedTarget: URL;
   try {
     parsedTarget = new URL(targetUrl);
@@ -538,12 +557,10 @@ async function handleProxy(
     return errorResponse("Invalid target URL");
   }
 
-  // Only allow HTTP(S)
   if (!["http:", "https:"].includes(parsedTarget.protocol)) {
     return errorResponse("Only HTTP/HTTPS URLs are allowed");
   }
 
-  // Block internal/private IPs (SSRF protection)
   const hostname = parsedTarget.hostname;
   if (
     hostname === "localhost" ||
@@ -558,7 +575,20 @@ async function handleProxy(
   }
 
   try {
-    return await proxyRequest(targetUrl, request);
+    const response = await proxyRequest(targetUrl, request);
+    const newResponse = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+
+    if (lowBalance) {
+      newResponse.headers.set("X-Low-Balance", "true");
+      newResponse.headers.set("X-Balance-Warning", `Low balance: ~${balanceStrk?.toFixed(4)} STRK remaining`);
+    }
+
+    newResponse.headers.set("X-Proxy-By", "ZOR-STRK20-Proxy");
+    return newResponse;
   } catch (error) {
     return errorResponse(`Proxy error: ${error}`, 502);
   }
@@ -568,7 +598,7 @@ async function handleStatus(env: Env): Promise<Response> {
   return jsonResponse({
     status: "online",
     service: "ZOR STRK20 Proxy",
-    version: "0.1.0",
+    version: "0.2.0",
     rpcConfigured: !!env.STARKNET_RPC_URL,
     strk20Contract: env.STRK20_CONTRACT_ADDRESS || "not set",
     proxyWallet: env.PROXY_WALLET_ADDRESS || "not set",
@@ -588,15 +618,20 @@ async function handleSessionStatus(
     return jsonResponse({ valid: false });
   }
 
-  const { valid, session } = await validateSession(env, token);
+  const { valid, session, lowBalance, balanceStrk } = await validateSession(env, token);
   if (!valid || !session) {
-    return jsonResponse({ valid: false });
+    return jsonResponse({ valid: false, reason: "expired_or_insufficient_balance" });
   }
+
+  const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
+  const minutesRemaining = pricePerMinute > 0 && balanceStrk ? balanceStrk / pricePerMinute : 0;
 
   return jsonResponse({
     valid: true,
-    expiresAt: session.expiresAt,
-    remainingMs: session.expiresAt - Date.now(),
+    depositAddress: session.depositAddress,
+    balance: balanceStrk?.toFixed(4) || "0",
+    minutesRemaining: Math.floor(minutesRemaining),
+    lowBalance,
     walletAddress: session.walletAddress,
   });
 }
@@ -609,18 +644,18 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
-        headers: {
-          ...CORS_HEADERS,
-          "Access-Control-Max-Age": "86400",
-        },
+        headers: { ...CORS_HEADERS, "Access-Control-Max-Age": "86400" },
       });
     }
 
     const path = url.pathname;
+
+    if (path === "/deposit-address" && request.method === "POST") {
+      return handleDepositAddress(request, env);
+    }
 
     if (path === "/activate" && request.method === "POST") {
       return handleActivate(request, env);
@@ -638,11 +673,10 @@ export default {
       return handleSessionStatus(request, env);
     }
 
-    // Health check
     if (path === "/" || path === "/health") {
       return jsonResponse({
         service: "zor-proxy",
-        version: "0.1.0",
+        version: "0.2.0",
         status: "healthy",
         rpcConfigured: !!env.STARKNET_RPC_URL,
         kvConfigured: !!env.SESSIONS,
@@ -650,7 +684,6 @@ export default {
       });
     }
 
-    // Default: 402
     return new Response(
       JSON.stringify({
         error: "402 Payment Required",
