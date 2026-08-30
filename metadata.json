@@ -1,0 +1,8 @@
+{
+  "name": "Zor Privacy Network",
+  "description": "A Zero-Knowledge privacy tool inspired by Tor, with node rewards and anonymous payments via Tongo on Starknet. Vintage 90s aesthetic.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": []
+}
