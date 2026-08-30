@@ -10,6 +10,7 @@ import {
   getProxyUrl,
   PROXY_WALLET,
   PRICE_PER_MINUTE,
+  STRK20_CONTRACT,
 } from './services/proxyService';
 
 type ViewMode = 'home' | 'browse';
@@ -127,7 +128,72 @@ const App: React.FC = () => {
     }
   };
 
-  // Step 2: User sends STRK manually, then clicks "I've sent it"
+  // Step 2: Send STRK from connected wallet to deposit address
+  const handleSendAndActivate = async () => {
+    if (!account || !depositAddress || !depositAmount) return;
+
+    setIsLoading(true);
+    setStatus('Sending STRK from wallet...');
+
+    try {
+      const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 1e18));
+
+      // Send STRK to the deposit address
+      const result = await account.execute({
+        contractAddress: STRK20_CONTRACT,
+        entrypoint: 'transfer',
+        calldata: [
+          depositAddress,
+          '0x' + amountWei.toString(16),
+          '0'
+        ]
+      });
+
+      const txHash = result.transaction_hash;
+      setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for balance...`);
+
+      // Wait a bit for the tx to be indexed
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Now activate
+      setPayStep('funded');
+      setStatus('Verifying balance on-chain...');
+
+      const activation = await activateSession(
+        account.address || account.selectedAddress,
+        depositAddress,
+        depositMinutes
+      );
+
+      if (activation.success && activation.token) {
+        setSessionToken(activation.token);
+        setSessionBalance(activation.balance || '0');
+        setPayStep('idle');
+        setDepositAddress(null);
+        setDepositAmount(null);
+        setStatus('SESSION ACTIVE');
+        setViewMode('browse');
+
+        localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
+        localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
+      } else {
+        setPayStep('deposit');
+        setStatus(`ACTIVATION FAILED: ${activation.error || 'Balance not yet available. Try again in a few seconds.'}`);
+      }
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      if (msg.includes('user declined') || msg.includes('user rejected')) {
+        setStatus('Payment cancelled by user.');
+      } else {
+        setStatus(`TX ERROR: ${msg}`);
+      }
+      setPayStep('deposit');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Manual "I've sent it" fallback
   const handleFunded = () => {
     setPayStep('funded');
     setStatus('Verifying balance on-chain...');
@@ -352,12 +418,23 @@ const App: React.FC = () => {
             <span>Amount: <span className="font-bold text-blue-700">{depositAmount} STRK</span></span>
             <span className="text-gray-500">{depositMinutes} min</span>
           </div>
+
+          {/* Primary: Send from connected wallet */}
+          <button
+            onClick={handleSendAndActivate}
+            disabled={isLoading}
+            className="retro-border retro-button bg-blue-700 text-white px-6 py-3 text-xs font-bold uppercase w-full disabled:opacity-50"
+          >
+            {isLoading ? 'SENDING...' : `SEND ${depositAmount} STRK & ACTIVATE`}
+          </button>
+
+          {/* Fallback: manual send */}
           <div className="flex gap-2">
             <button
               onClick={handleFunded}
               className="retro-border retro-button bg-green-600 text-white px-4 py-2 text-xs font-bold uppercase flex-1"
             >
-              I'VE SENT IT — ACTIVATE
+              I'VE SENT IT MANUALLY
             </button>
             <button
               onClick={handleCancelPay}
@@ -366,8 +443,9 @@ const App: React.FC = () => {
               CANCEL
             </button>
           </div>
+
           <p className="text-[9px] text-gray-500">
-            Send exactly {depositAmount} STRK to the address above. The session activates once the balance is verified.
+            Click the button above to send from your connected wallet, or send manually and click "I've sent it".
           </p>
         </div>
       )}
