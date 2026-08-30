@@ -94,7 +94,7 @@ const App: React.FC = () => {
       const totalCost = minutes * PRICE_PER_MINUTE;
       const amountWei = BigInt(Math.floor(totalCost * 1e18));
 
-      const STRK_TOKEN = '0x04718f5a0fc33cc95686dfce5812608230a8792b944ce993fe158e2e583d4df5';
+      const STRK_TOKEN = '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
       const result = await account.execute({
         contractAddress: STRK_TOKEN,
         entrypoint: 'transfer',
