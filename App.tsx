@@ -138,14 +138,18 @@ const App: React.FC = () => {
     try {
       const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 1e18));
 
+      // Split amount into low/high parts for felt252 (max 128 bits each)
+      const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
+      const amountHigh = amountWei >> BigInt(128);
+
       // Send STRK to the deposit address
       const result = await account.execute({
         contractAddress: STRK20_CONTRACT,
         entrypoint: 'transfer',
         calldata: [
           depositAddress,
-          '0x' + amountWei.toString(16),
-          '0'
+          '0x' + amountLow.toString(16),
+          '0x' + amountHigh.toString(16),
         ]
       });
 
