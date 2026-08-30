@@ -4,17 +4,21 @@ import RetroWindow from './components/RetroWindow';
 import WalletConnect from './components/WalletConnect';
 import Browser from './components/Browser';
 import {
+  getDepositAddress,
   activateSession,
+  checkSession,
   getProxyUrl,
   PROXY_WALLET,
   PRICE_PER_MINUTE,
 } from './services/proxyService';
 
 type ViewMode = 'home' | 'browse';
+type PayStep = 'idle' | 'deposit' | 'funded' | 'activating';
 
 const MINUTE_OPTIONS = [15, 30, 60, 120];
 const SESSION_TOKEN_KEY = 'zor_session_token';
-const SESSION_EXPIRES_KEY = 'zor_session_expires';
+const SESSION_DEPOSIT_KEY = 'zor_session_deposit';
+const SESSION_BALANCE_KEY = 'zor_session_balance';
 
 const App: React.FC = () => {
   const [account, setAccount] = useState<any>(null);
@@ -24,114 +28,143 @@ const App: React.FC = () => {
   const [proxyUrl, setProxyUrl] = useState<string>('');
   const [status, setStatus] = useState<string>('');
   const [sessionToken, setSessionToken] = useState<string | null>(null);
-  const [sessionExpires, setSessionExpires] = useState<number | null>(null);
+  const [sessionBalance, setSessionBalance] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [timeRemaining, setTimeRemaining] = useState<string>('');
   const [browserLoading, setBrowserLoading] = useState<boolean>(false);
 
+  // Pay flow state
+  const [payStep, setPayStep] = useState<PayStep>('idle');
+  const [depositAddress, setDepositAddress] = useState<string | null>(null);
+  const [depositAmount, setDepositAmount] = useState<string | null>(null);
+  const [depositMinutes, setDepositMinutes] = useState<number>(0);
+
   // Restore session from localStorage on mount
   useEffect(() => {
     const savedToken = localStorage.getItem(SESSION_TOKEN_KEY);
-    const savedExpires = localStorage.getItem(SESSION_EXPIRES_KEY);
-    if (savedToken && savedExpires) {
-      const expires = parseInt(savedExpires, 10);
-      if (Date.now() < expires) {
-        setSessionToken(savedToken);
-        setSessionExpires(expires);
-        setViewMode('browse');
-        setStatus('SESSION RESTORED');
-      } else {
-        localStorage.removeItem(SESSION_TOKEN_KEY);
-        localStorage.removeItem(SESSION_EXPIRES_KEY);
-      }
+    const savedBalance = localStorage.getItem(SESSION_BALANCE_KEY);
+    if (savedToken) {
+      (async () => {
+        const result = await checkSession(savedToken);
+        if (result.valid) {
+          setSessionToken(savedToken);
+          setSessionBalance(result.balance || '0');
+          setViewMode('browse');
+          setStatus('SESSION RESTORED');
+        } else {
+          localStorage.removeItem(SESSION_TOKEN_KEY);
+          localStorage.removeItem(SESSION_BALANCE_KEY);
+        }
+      })();
     }
   }, []);
 
-  // Session countdown timer
+  // Balance-based countdown
   useEffect(() => {
-    if (!sessionExpires) {
+    if (!sessionToken) {
       setTimeRemaining('');
       return;
     }
 
-    const tick = () => {
-      const now = Date.now();
-      const diff = sessionExpires - now;
-      if (diff <= 0) {
+    const tick = async () => {
+      const result = await checkSession(sessionToken);
+      if (!result.valid) {
         setSessionToken(null);
-        setSessionExpires(null);
+        setSessionBalance(null);
         setProxyUrl('');
-        setStatus('SESSION EXPIRED');
+        setStatus('SESSION EXPIRED — insufficient balance');
         setTimeRemaining('');
         localStorage.removeItem(SESSION_TOKEN_KEY);
-        localStorage.removeItem(SESSION_EXPIRES_KEY);
+        localStorage.removeItem(SESSION_BALANCE_KEY);
         return;
       }
-      const totalSeconds = Math.floor(diff / 1000);
-      const hrs = Math.floor(totalSeconds / 3600);
-      const mins = Math.floor((totalSeconds % 3600) / 60);
-      const secs = totalSeconds % 60;
-      setTimeRemaining(
-        hrs > 0 ? `${hrs}h ${mins}m ${secs}s` : `${mins}m ${secs}s`
-      );
+
+      setSessionBalance(result.balance || '0');
+      const mins = result.minutesRemaining || 0;
+      const hrs = Math.floor(mins / 60);
+      const m = mins % 60;
+      setTimeRemaining(hrs > 0 ? `${hrs}h ${m}m` : `${m}m`);
+
+      if (result.lowBalance) {
+        setStatus(`LOW BALANCE — ${result.balance} STRK remaining. Top up soon!`);
+      }
     };
 
     tick();
-    const interval = setInterval(tick, 1000);
+    const interval = setInterval(tick, 15_000); // check every 15s
     return () => clearInterval(interval);
-  }, [sessionExpires]);
+  }, [sessionToken]);
 
-  const handlePayAndActivate = async () => {
+  // Step 1: Get deposit address
+  const handleGetDepositAddress = async () => {
     if (!account) {
       setStatus('ERROR: Connect wallet first.');
       return;
     }
 
     setIsLoading(true);
-    setStatus('Initiating STRK transfer...');
+    setStatus('Generating deposit address...');
 
     try {
-      const totalCost = minutes * PRICE_PER_MINUTE;
-      const amountWei = BigInt(Math.floor(totalCost * 1e18));
-
-      const STRK_TOKEN = '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d';
-      const result = await account.execute({
-        contractAddress: STRK_TOKEN,
-        entrypoint: 'transfer',
-        calldata: [
-          PROXY_WALLET,
-          '0x' + amountWei.toString(16),
-          '0'
-        ]
-      });
-
-      const txHash = result.transaction_hash;
-      setStatus(`TX submitted: ${txHash.slice(0, 16)}... Verifying onchain...`);
-
-      const activation = await activateSession(
+      const result = await getDepositAddress(
         account.address || account.selectedAddress,
-        txHash,
         minutes
       );
 
-      if (activation.success && activation.token && activation.expiresAt) {
-        setSessionToken(activation.token);
-        setSessionExpires(activation.expiresAt);
+      if (result.success && result.depositAddress) {
+        setDepositAddress(result.depositAddress);
+        setDepositAmount(result.expectedAmount || '0');
+        setDepositMinutes(minutes);
+        setPayStep('deposit');
+        setStatus(`Deposit address generated. Send ${result.expectedAmount} STRK to continue.`);
+      } else {
+        setStatus(`ERROR: ${result.error}`);
+      }
+    } catch (error: any) {
+      setStatus(`ERROR: ${error.message}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Step 2: User sends STRK manually, then clicks "I've sent it"
+  const handleFunded = () => {
+    setPayStep('funded');
+    setStatus('Verifying balance on-chain...');
+  };
+
+  // Step 3: Activate session after funding
+  const handleActivate = async () => {
+    if (!account || !depositAddress) return;
+
+    setIsLoading(true);
+    setStatus('Checking balance...');
+
+    try {
+      const result = await activateSession(
+        account.address || account.selectedAddress,
+        depositAddress,
+        depositMinutes
+      );
+
+      if (result.success && result.token) {
+        setSessionToken(result.token);
+        setSessionBalance(result.balance || '0');
+        setPayStep('idle');
+        setDepositAddress(null);
+        setDepositAmount(null);
         setStatus('SESSION ACTIVE');
         setViewMode('browse');
 
-        localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
-        localStorage.setItem(SESSION_EXPIRES_KEY, activation.expiresAt.toString());
+        localStorage.setItem(SESSION_TOKEN_KEY, result.token);
+        localStorage.setItem(SESSION_BALANCE_KEY, result.balance || '0');
       } else {
-        setStatus(`ACTIVATION FAILED: ${activation.error}`);
+        setPayStep('deposit');
+        setStatus(`ACTIVATION FAILED: ${result.error || 'Insufficient balance'}`);
       }
     } catch (error: any) {
-      const msg = error?.message || String(error);
-      if (msg.includes('user declined') || msg.includes('user rejected')) {
-        setStatus('Payment cancelled by user.');
-      } else {
-        setStatus(`TX ERROR: ${msg}`);
-      }
+      setStatus(`ERROR: ${error.message}`);
+      setPayStep('deposit');
     } finally {
       setIsLoading(false);
     }
@@ -150,15 +183,24 @@ const App: React.FC = () => {
 
   const handleLogout = () => {
     setSessionToken(null);
-    setSessionExpires(null);
+    setSessionBalance(null);
     setProxyUrl('');
+    setPayStep('idle');
+    setDepositAddress(null);
     setStatus('Session ended.');
     localStorage.removeItem(SESSION_TOKEN_KEY);
-    localStorage.removeItem(SESSION_EXPIRES_KEY);
+    localStorage.removeItem(SESSION_BALANCE_KEY);
+  };
+
+  const handleCancelPay = () => {
+    setPayStep('idle');
+    setDepositAddress(null);
+    setDepositAmount(null);
+    setStatus('');
   };
 
   const isConnected = !!account;
-  const hasActiveSession = !!sessionToken && !!sessionExpires && sessionExpires > Date.now();
+  const hasActiveSession = !!sessionToken;
   const totalCost = (minutes * PRICE_PER_MINUTE).toFixed(4);
 
   const renderHome = () => (
@@ -178,8 +220,8 @@ const App: React.FC = () => {
             <h4 className="font-bold text-blue-600 uppercase">How it works:</h4>
             <ol className="mt-1 space-y-1 list-decimal list-inside">
               <li>Connect your Starknet wallet</li>
-              <li>Pay STRK20 for proxy access (0.001/min)</li>
-              <li>Type a URL and browse anonymously</li>
+              <li>Get a deposit address & send STRK</li>
+              <li>Browse — balance is deducted in real time</li>
             </ol>
           </div>
           <p className="text-[10px] leading-relaxed text-gray-600">
@@ -191,7 +233,7 @@ const App: React.FC = () => {
           <div className="w-32 h-32 border-4 border-gray-400 bg-gray-300 flex items-center justify-center text-4xl shadow-inner">
             🌐
           </div>
-          <span className="text-[10px] uppercase mt-2">v0.1-LAB</span>
+          <span className="text-[10px] uppercase mt-2">v0.2-LAB</span>
         </div>
       </div>
 
@@ -200,6 +242,7 @@ const App: React.FC = () => {
         <p>NETWORK: STARKNET SEPOLIA</p>
         <p>STEALTH: ENABLED (raw TCP sockets)</p>
         <p>PRIVACY: cf-* HEADERS STRIPPED</p>
+        <p>BILLING: BALANCE-BASED (deducts in real time)</p>
       </div>
 
       <div className="retro-border p-3 bg-gray-100">
@@ -224,7 +267,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-3">
           <span className={`w-2 h-2 rounded-full ${hasActiveSession ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
           <span className="text-xs font-bold uppercase">
-            {hasActiveSession ? `SESSION: ${timeRemaining}` : 'NO ACTIVE SESSION'}
+            {hasActiveSession ? `BALANCE: ${sessionBalance || '0'} STRK — ${timeRemaining}` : 'NO ACTIVE SESSION'}
           </span>
         </div>
         <div className="flex items-center gap-2">
@@ -236,9 +279,6 @@ const App: React.FC = () => {
               [END SESSION]
             </button>
           )}
-          <span className="text-[10px] text-gray-600">
-            {hasActiveSession ? `Expires: ${new Date(sessionExpires!).toLocaleTimeString()}` : 'Purchase time to browse'}
-          </span>
         </div>
       </div>
 
@@ -266,8 +306,8 @@ const App: React.FC = () => {
         </button>
       </div>
 
-      {/* Purchase Panel */}
-      {!hasActiveSession && (
+      {/* PAY FLOW */}
+      {!hasActiveSession && payStep === 'idle' && (
         <div className="retro-border p-3 bg-gray-100 space-y-3">
           <h4 className="font-bold text-xs uppercase">Purchase Proxy Time</h4>
           <div className="flex gap-2 items-center">
@@ -285,19 +325,50 @@ const App: React.FC = () => {
           <div className="flex justify-between items-center">
             <span className="text-xs font-bold">Total: <span className="text-blue-700">{totalCost} STRK</span></span>
             <button
-              onClick={handlePayAndActivate}
+              onClick={handleGetDepositAddress}
               disabled={!isConnected || isLoading}
               className="retro-border retro-button bg-blue-700 text-white px-6 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
             >
-              {isLoading ? 'PROCESSING...' : 'PAY & ACTIVATE'}
+              {isLoading ? 'GENERATING...' : 'GET DEPOSIT ADDRESS'}
             </button>
           </div>
           {!isConnected && (
             <p className="text-[10px] text-red-600 font-bold">Connect your Starknet wallet to proceed.</p>
           )}
-          <div className="text-[10px] text-gray-500">
-            Payment goes to: {PROXY_WALLET.slice(0, 10)}...{PROXY_WALLET.slice(-6)}
+        </div>
+      )}
+
+      {/* DEPOSIT ADDRESS DISPLAY */}
+      {!hasActiveSession && payStep === 'deposit' && depositAddress && (
+        <div className="retro-border p-3 bg-yellow-50 space-y-3 border-2 border-yellow-400">
+          <h4 className="font-bold text-xs uppercase text-yellow-800">⚠ Send STRK to this address</h4>
+          <div className="retro-border-inset p-2 bg-white">
+            <div className="text-[10px] font-bold uppercase mb-1">Deposit Address:</div>
+            <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">
+              {depositAddress}
+            </div>
           </div>
+          <div className="flex justify-between items-center text-xs">
+            <span>Amount: <span className="font-bold text-blue-700">{depositAmount} STRK</span></span>
+            <span className="text-gray-500">{depositMinutes} min</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handleFunded}
+              className="retro-border retro-button bg-green-600 text-white px-4 py-2 text-xs font-bold uppercase flex-1"
+            >
+              I'VE SENT IT — ACTIVATE
+            </button>
+            <button
+              onClick={handleCancelPay}
+              className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase"
+            >
+              CANCEL
+            </button>
+          </div>
+          <p className="text-[9px] text-gray-500">
+            Send exactly {depositAmount} STRK to the address above. The session activates once the balance is verified.
+          </p>
         </div>
       )}
 
@@ -326,13 +397,11 @@ const App: React.FC = () => {
       {/* Sticky Navbar */}
       <nav className="sticky top-0 z-50 retro-border bg-[#c0c0c0] border-b-2 border-gray-400">
         <div className="max-w-6xl mx-auto px-4 py-1.5 flex items-center gap-4">
-          {/* Logo */}
           <div className="flex items-center gap-2 shrink-0">
             <span className="text-lg font-bold font-['VT323'] text-blue-900 tracking-wider">ZOR</span>
-            <span className="text-[8px] text-gray-600 hidden sm:inline">v0.1-LAB</span>
+            <span className="text-[8px] text-gray-600 hidden sm:inline">v0.2-LAB</span>
           </div>
 
-          {/* Nav buttons */}
           <div className="flex gap-1">
             <button
               onClick={() => setViewMode('home')}
@@ -348,18 +417,15 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          {/* Session indicator in navbar */}
           {hasActiveSession && (
             <div className="hidden md:flex items-center gap-1.5 text-[10px] text-green-700 font-bold">
               <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-              {timeRemaining}
+              {sessionBalance} STRK — {timeRemaining}
             </div>
           )}
 
-          {/* Spacer */}
           <div className="flex-1"></div>
 
-          {/* Wallet — compact inline */}
           <WalletConnect onAccountChange={setAccount} />
         </div>
       </nav>
@@ -384,7 +450,6 @@ const App: React.FC = () => {
           </section>
 
           <aside className="space-y-4">
-            {/* Session Info */}
             <RetroWindow title="SESSION_INFO" icon="⏱">
               <div className="space-y-2 text-[10px]">
                 <div className="flex justify-between">
@@ -396,12 +461,12 @@ const App: React.FC = () => {
                 {hasActiveSession && (
                   <>
                     <div className="flex justify-between">
-                      <span className="font-bold uppercase">Time Left:</span>
-                      <span className="font-bold">{timeRemaining}</span>
+                      <span className="font-bold uppercase">Balance:</span>
+                      <span className="font-bold">{sessionBalance || '0'} STRK</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="font-bold uppercase">Expires:</span>
-                      <span>{new Date(sessionExpires!).toLocaleTimeString()}</span>
+                      <span className="font-bold uppercase">Time Left:</span>
+                      <span className="font-bold">{timeRemaining}</span>
                     </div>
                   </>
                 )}
