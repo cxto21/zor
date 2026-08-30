@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { connect, disconnect } from "starknetkit";
 
-// Sepolia chainId as felt252 short string
 const SN_SEPOLIA_CHAIN_ID = BigInt("0x534e5f5345504f4c4941");
 const STORAGE_KEY_ADDRESS = "zor_wallet_address";
 
@@ -10,15 +9,7 @@ interface WalletConnectProps {
   onAccountChange: (account: any) => void;
 }
 
-/**
- * Extract a usable account object from the wallet.
- * Different wallets expose the account through different properties.
- * We try wallet.account first (most common), then getSelectedAccount(),
- * then accountObject.  The returned object must have .execute() and .address
- * for App.tsx to work.
- */
 async function extractAccount(wallet: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  // 1. wallet.account — ArgentX, Braavos, Ready, Xverse all set this
   const walletAccount = wallet.account;
   if (
     walletAccount &&
@@ -28,7 +19,6 @@ async function extractAccount(wallet: Record<string, unknown>): Promise<Record<s
     return walletAccount as Record<string, unknown>;
   }
 
-  // 2. wallet.getSelectedAccount() — async in some wallets (e.g. older ArgentX)
   const getSelected = wallet.getSelectedAccount;
   if (typeof getSelected === "function") {
     try {
@@ -36,12 +26,9 @@ async function extractAccount(wallet: Record<string, unknown>): Promise<Record<s
       if (selected && typeof selected.execute === "function") {
         return selected;
       }
-    } catch {
-      // Silently ignore — will fall through to next strategy
-    }
+    } catch {}
   }
 
-  // 3. wallet.accountObject — used by some wallet implementations
   const accountObject = wallet.accountObject;
   if (
     accountObject &&
@@ -54,25 +41,18 @@ async function extractAccount(wallet: Record<string, unknown>): Promise<Record<s
   return null;
 }
 
-/**
- * Extract the hex address from the wallet or account object.
- * Tries multiple paths wallets use to expose the address.
- */
 function extractAddress(
   wallet: Record<string, unknown>,
   account: Record<string, unknown> | null
 ): string | null {
-  // From the account object (most reliable after extraction)
   if (account && typeof account.address === "string" && account.address.length > 0) {
     return account.address;
   }
-  // From the account object (selectedAddress fallback)
-  if (account && typeof account.selectedAddress === "string" && account.selectedAddress.length > 0) {
-    return account.selectedAddress;
+  if (account && typeof (account as any).selectedAddress === "string" && (account as any).selectedAddress.length > 0) {
+    return (account as any).selectedAddress;
   }
-  // From the wallet directly
-  if (typeof wallet.selectedAddress === "string" && wallet.selectedAddress.length > 0) {
-    return wallet.selectedAddress;
+  if (typeof wallet.selectedAddress === "string" && (wallet as any).selectedAddress.length > 0) {
+    return (wallet as any).selectedAddress;
   }
   return null;
 }
@@ -82,17 +62,11 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [error, setError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [wrongNetwork, setWrongNetwork] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const checkNetwork = useCallback((chainId: bigint | undefined) => {
-    if (chainId !== undefined && chainId !== SN_SEPOLIA_CHAIN_ID) {
-      setWrongNetwork(true);
-    } else {
-      setWrongNetwork(false);
-    }
+    setWrongNetwork(chainId !== undefined && chainId !== SN_SEPOLIA_CHAIN_ID);
   }, []);
 
-  // Restore connection from localStorage on mount
   useEffect(() => {
     const savedAddress = localStorage.getItem(STORAGE_KEY_ADDRESS);
     if (!savedAddress) return;
@@ -109,17 +83,12 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
           return;
         }
 
-        // Try to get account from connector first (starknetkit v3+)
         let account: any = null;
         if (connector && typeof connector.account === "function") {
           try {
             account = await connector.account({ nodeUrl: "https://starknet-sepolia.public.blastapi.io/rpc/v0_7" });
-          } catch {
-            // fallback to wallet extraction
-          }
+          } catch {}
         }
-
-        // Fallback: extract from wallet object
         if (!account && wallet) {
           account = await extractAccount(wallet as unknown as Record<string, unknown>);
         }
@@ -129,7 +98,6 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
           account as Record<string, unknown> | null
         );
 
-        // Verify it's the same address we saved
         if (addr && addr.toLowerCase() === savedAddress.toLowerCase() && account) {
           setAddress(addr);
           onAccountChange(account);
@@ -138,12 +106,9 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
           localStorage.removeItem(STORAGE_KEY_ADDRESS);
         }
       } catch {
-        // Silent reconnect failed — wallet may have been uninstalled or locked
         localStorage.removeItem(STORAGE_KEY_ADDRESS);
       }
     })();
-    // Only run on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleConnect = async () => {
@@ -165,25 +130,18 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         throw new Error("No wallet returned. Is a Starknet wallet installed?");
       }
 
-      // Try to get account from connector first (starknetkit v3+)
       let account: any = null;
       if (connector && typeof connector.account === "function") {
         try {
           account = await connector.account({ nodeUrl: "https://starknet-sepolia.public.blastapi.io/rpc/v0_7" });
-        } catch {
-          // fallback to wallet extraction
-        }
+        } catch {}
       }
-
-      // Fallback: extract from wallet object
       if (!account && wallet) {
         account = await extractAccount(wallet as unknown as Record<string, unknown>);
       }
 
       if (!account) {
-        throw new Error(
-          "Could not read account from wallet. Make sure it is unlocked."
-        );
+        throw new Error("Could not read account from wallet. Make sure it is unlocked.");
       }
 
       const addr = connectorData?.account || extractAddress(
@@ -200,8 +158,6 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       checkNetwork(connectorData?.chainId);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-
-      // Don't show error for user cancellations
       if (
         msg.toLowerCase().includes("user declined") ||
         msg.toLowerCase().includes("user rejected") ||
@@ -211,7 +167,6 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       } else {
         setError(msg);
       }
-
       console.error("Wallet connection error:", e);
     } finally {
       setIsConnecting(false);
@@ -231,70 +186,47 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     onAccountChange(null);
   };
 
-  const handleCopyAddress = async () => {
-    if (!address) return;
-    try {
-      await navigator.clipboard.writeText(address);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API may be blocked in some contexts
-    }
-  };
-
   const truncateAddress = (addr: string) =>
     `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 
   return (
-    <div className="flex flex-col gap-2">
-      {/* Network warning */}
+    <div className="flex items-center gap-2">
+      {/* Network warning — compact pill */}
       {wrongNetwork && (
-        <div className="retro-border-inset p-2 text-[10px] bg-yellow-300 text-black font-bold uppercase">
-          ⚠ Wrong network — switch to Sepolia testnet
-        </div>
+        <span className="text-[9px] bg-yellow-400 text-black font-bold px-2 py-0.5 rounded">
+          WRONG NETWORK
+        </span>
       )}
 
-      {/* Error display */}
+      {/* Error — compact */}
       {error && (
-        <div className="retro-border-inset p-2 text-[10px] bg-red-600 text-white font-bold uppercase break-all">
-          ✗ {error}
-        </div>
+        <span className="text-[9px] bg-red-600 text-white font-bold px-2 py-0.5 rounded max-w-[200px] truncate" title={error}>
+          ✗ {error.length > 30 ? error.slice(0, 30) + '…' : error}
+        </span>
       )}
 
       {address ? (
-        <div className="flex flex-col gap-2">
-          {/* Connected address */}
-          <div className="retro-border-inset p-2 text-[10px]">
-            <div className="font-bold uppercase text-[10px] mb-1">Connected:</div>
-            <button
-              onClick={handleCopyAddress}
-              className="text-left hover:underline w-full cursor-pointer"
-              title={address}
-            >
-              {copied ? "Copied!" : truncateAddress(address)}
-            </button>
-          </div>
-
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] font-mono text-gray-700 bg-white retro-border-inset px-2 py-0.5">
+            {truncateAddress(address)}
+          </span>
           <button
             onClick={handleDisconnect}
-            className="retro-border retro-button bg-[#c0c0c0] px-4 py-2 text-sm font-bold uppercase shadow-[inset_1px_1px_#fff,inset_-1px_-1px_#808080]"
+            className="text-[9px] text-red-600 font-bold hover:underline cursor-pointer"
+            title="Disconnect wallet"
           >
-            Disconnect Wallet
+            ✕
           </button>
         </div>
       ) : (
         <button
           onClick={handleConnect}
           disabled={isConnecting}
-          className="retro-border retro-button bg-[#c0c0c0] px-4 py-2 text-sm font-bold uppercase shadow-[inset_1px_1px_#fff,inset_-1px_-1px_#808080] disabled:opacity-60"
+          className="retro-border retro-button bg-[#c0c0c0] px-3 py-1 text-[10px] font-bold uppercase disabled:opacity-60 cursor-pointer"
         >
-          {isConnecting ? "Connecting..." : "Connect Starknet"}
+          {isConnecting ? '...' : 'Connect Wallet'}
         </button>
       )}
-
-      <div className="mt-2 text-[10px] text-gray-600 italic">
-        *Payments powered by STRK20 Privacy Pool on Starknet.
-      </div>
     </div>
   );
 };

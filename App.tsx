@@ -2,13 +2,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import RetroWindow from './components/RetroWindow';
 import WalletConnect from './components/WalletConnect';
+import Browser from './components/Browser';
 import {
   activateSession,
   getProxyUrl,
-  checkSession,
   PROXY_WALLET,
   PRICE_PER_MINUTE,
-  STRK20_CONTRACT,
 } from './services/proxyService';
 
 type ViewMode = 'home' | 'browse';
@@ -28,6 +27,7 @@ const App: React.FC = () => {
   const [sessionExpires, setSessionExpires] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [timeRemaining, setTimeRemaining] = useState<string>('');
+  const [browserLoading, setBrowserLoading] = useState<boolean>(false);
 
   // Restore session from localStorage on mount
   useEffect(() => {
@@ -88,17 +88,19 @@ const App: React.FC = () => {
     }
 
     setIsLoading(true);
-    setStatus('Initiating STRK20 transfer...');
+    setStatus('Initiating STRK transfer...');
 
     try {
-      // Step 1: Transfer STRK20 to the proxy wallet via the token contract
       const totalCost = minutes * PRICE_PER_MINUTE;
+      const amountWei = BigInt(Math.floor(totalCost * 1e18));
+
+      const STRK_TOKEN = '0x04718f5a0fc33cc95686dfce5812608230a8792b944ce993fe158e2e583d4df5';
       const result = await account.execute({
-        contractAddress: STRK20_CONTRACT,
+        contractAddress: STRK_TOKEN,
         entrypoint: 'transfer',
         calldata: [
           PROXY_WALLET,
-          Math.floor(totalCost * 1e18).toString(16),
+          '0x' + amountWei.toString(16),
           '0'
         ]
       });
@@ -106,7 +108,6 @@ const App: React.FC = () => {
       const txHash = result.transaction_hash;
       setStatus(`TX submitted: ${txHash.slice(0, 16)}... Verifying onchain...`);
 
-      // Step 2: Activate session via Worker (verifies tx on Starknet)
       const activation = await activateSession(
         account.address || account.selectedAddress,
         txHash,
@@ -119,14 +120,18 @@ const App: React.FC = () => {
         setStatus('SESSION ACTIVE');
         setViewMode('browse');
 
-        // Persist session
         localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
         localStorage.setItem(SESSION_EXPIRES_KEY, activation.expiresAt.toString());
       } else {
         setStatus(`ACTIVATION FAILED: ${activation.error}`);
       }
     } catch (error: any) {
-      setStatus(`TX ERROR: ${error.message || 'Transfer failed'}`);
+      const msg = error?.message || String(error);
+      if (msg.includes('user declined') || msg.includes('user rejected')) {
+        setStatus('Payment cancelled by user.');
+      } else {
+        setStatus(`TX ERROR: ${msg}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -136,6 +141,7 @@ const App: React.FC = () => {
     if (!url.trim() || !sessionToken) return;
     const formatted = url.startsWith('http') ? url : `https://${url}`;
     setProxyUrl(getProxyUrl(formatted, sessionToken));
+    setBrowserLoading(true);
   }, [url, sessionToken]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -304,130 +310,145 @@ const App: React.FC = () => {
 
       {/* Browser Frame */}
       <div className="retro-border-inset flex-1 bg-white min-h-[400px]">
-        {proxyUrl ? (
-          <iframe
-            src={proxyUrl}
-            className="w-full h-full border-0 min-h-[400px]"
-            title="Proxy Browser"
-            sandbox="allow-scripts allow-same-origin allow-forms"
-          />
-        ) : (
-          <div className="flex items-center justify-center h-full min-h-[400px] text-gray-400 text-xs">
-            {hasActiveSession ? 'Enter a URL above to browse' : 'Purchase session time to start browsing'}
-          </div>
-        )}
+        <Browser
+          proxyUrl={proxyUrl}
+          isLoading={browserLoading}
+          onLoadStart={() => setBrowserLoading(true)}
+          onLoadEnd={() => setBrowserLoading(false)}
+          onError={(err) => setStatus(`BROWSER ERROR: ${err}`)}
+        />
       </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto crt relative">
-      <header className="mb-6">
-        <div className="retro-border bg-[#c0c0c0] mb-4">
-          <marquee scrollamount="5">
-            ZOR_PROXY :: STRK20 ANONYMOUS PROXY LAB :: STEALTH MODE :: NO LOGS :: STARKNET POWERED :: ZERO-KNOWLEDGE PRIVACY ::
-          </marquee>
-        </div>
-        <div className="flex flex-wrap gap-2 items-center bg-[#c0c0c0] retro-border p-2">
-          <button
-            onClick={() => setViewMode('home')}
-            className={`px-4 py-1 text-[10px] font-bold retro-border ${viewMode === 'home' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
-          >
-            HOME
-          </button>
-          <button
-            onClick={() => setViewMode('browse')}
-            className={`px-4 py-1 text-[10px] font-bold retro-border ${viewMode === 'browse' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
-          >
-            BROWSE
-          </button>
-          <div className="flex-1 text-right text-[8px] font-bold text-blue-900 pr-2 italic">
-            ZOR_PROXY v0.1-LAB
+    <div className="min-h-screen flex flex-col crt relative">
+      {/* Sticky Navbar */}
+      <nav className="sticky top-0 z-50 retro-border bg-[#c0c0c0] border-b-2 border-gray-400">
+        <div className="max-w-6xl mx-auto px-4 py-1.5 flex items-center gap-4">
+          {/* Logo */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-lg font-bold font-['VT323'] text-blue-900 tracking-wider">ZOR</span>
+            <span className="text-[8px] text-gray-600 hidden sm:inline">v0.1-LAB</span>
           </div>
+
+          {/* Nav buttons */}
+          <div className="flex gap-1">
+            <button
+              onClick={() => setViewMode('home')}
+              className={`px-3 py-1 text-[10px] font-bold retro-border ${viewMode === 'home' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
+            >
+              HOME
+            </button>
+            <button
+              onClick={() => setViewMode('browse')}
+              className={`px-3 py-1 text-[10px] font-bold retro-border ${viewMode === 'browse' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
+            >
+              BROWSE
+            </button>
+          </div>
+
+          {/* Session indicator in navbar */}
+          {hasActiveSession && (
+            <div className="hidden md:flex items-center gap-1.5 text-[10px] text-green-700 font-bold">
+              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+              {timeRemaining}
+            </div>
+          )}
+
+          {/* Spacer */}
+          <div className="flex-1"></div>
+
+          {/* Wallet — compact inline */}
+          <WalletConnect onAccountChange={setAccount} />
         </div>
-      </header>
+      </nav>
 
-      <main className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        <section className="lg:col-span-3">
-          <RetroWindow
-            title={viewMode === 'home' ? 'ZOR:\\HOME.EXE' : 'ZOR:\\BROWSER.EXE'}
-            className="h-full min-h-[550px]"
-          >
-            {viewMode === 'home' ? renderHome() : renderBrowse()}
-          </RetroWindow>
-        </section>
+      {/* Marquee ticker */}
+      <div className="bg-black overflow-hidden">
+        <div className="whitespace-nowrap animate-marquee py-0.5 text-[10px] font-bold text-green-500 font-mono">
+          ZOR_PROXY :: STRK20 ANONYMOUS PROXY LAB :: STEALTH MODE :: NO LOGS :: STARKNET POWERED :: ZERO-KNOWLEDGE PRIVACY ::
+        </div>
+      </div>
 
-        <aside className="space-y-6">
-          <RetroWindow title="WALLET" icon="💼">
-            <WalletConnect onAccountChange={setAccount} />
-          </RetroWindow>
+      {/* Main content */}
+      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-4">
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+          <section className="lg:col-span-3">
+            <RetroWindow
+              title={viewMode === 'home' ? 'ZOR:\\HOME.EXE' : 'ZOR:\\BROWSER.EXE'}
+              className="h-full min-h-[550px]"
+            >
+              {viewMode === 'home' ? renderHome() : renderBrowse()}
+            </RetroWindow>
+          </section>
 
-          <RetroWindow title="SESSION_INFO" icon="⏱">
-            <div className="space-y-2 text-[10px]">
-              <div className="flex justify-between">
-                <span className="font-bold uppercase">Status:</span>
-                <span className={hasActiveSession ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
-                  {hasActiveSession ? 'ACTIVE' : 'INACTIVE'}
-                </span>
+          <aside className="space-y-4">
+            {/* Session Info */}
+            <RetroWindow title="SESSION_INFO" icon="⏱">
+              <div className="space-y-2 text-[10px]">
+                <div className="flex justify-between">
+                  <span className="font-bold uppercase">Status:</span>
+                  <span className={hasActiveSession ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
+                    {hasActiveSession ? 'ACTIVE' : 'INACTIVE'}
+                  </span>
+                </div>
+                {hasActiveSession && (
+                  <>
+                    <div className="flex justify-between">
+                      <span className="font-bold uppercase">Time Left:</span>
+                      <span className="font-bold">{timeRemaining}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="font-bold uppercase">Expires:</span>
+                      <span>{new Date(sessionExpires!).toLocaleTimeString()}</span>
+                    </div>
+                  </>
+                )}
+                <div className="flex justify-between">
+                  <span className="font-bold uppercase">Wallet:</span>
+                  <span>{isConnected ? `${(account.address || account.selectedAddress || '').slice(0, 8)}...` : 'NONE'}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="font-bold uppercase">Rate:</span>
+                  <span>{PRICE_PER_MINUTE} STRK/min</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="font-bold uppercase">Stealth:</span>
+                  <span className="text-green-600 font-bold">ENABLED</span>
+                </div>
               </div>
-              {hasActiveSession && (
-                <>
-                  <div className="flex justify-between">
-                    <span className="font-bold uppercase">Time Left:</span>
-                    <span className="font-bold">{timeRemaining}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="font-bold uppercase">Expires:</span>
-                    <span>{new Date(sessionExpires!).toLocaleTimeString()}</span>
-                  </div>
-                </>
-              )}
-              <div className="flex justify-between">
-                <span className="font-bold uppercase">Wallet:</span>
-                <span>{isConnected ? `${(account.address || account.selectedAddress || '').slice(0, 8)}...` : 'NONE'}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="font-bold uppercase">Rate:</span>
-                <span>{PRICE_PER_MINUTE} STRK/min</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="font-bold uppercase">Stealth:</span>
-                <span className="text-green-600 font-bold">ENABLED</span>
+            </RetroWindow>
+
+            <div className="retro-border p-4 bg-gray-200 space-y-2">
+              <h4 className="text-[10px] font-bold uppercase underline">Proxy Network</h4>
+              <div className="w-full h-24 bg-black border-2 border-white relative overflow-hidden">
+                <div className="absolute inset-0 flex items-center justify-around opacity-40">
+                  <div className="w-1 h-12 bg-green-500 animate-pulse"></div>
+                  <div className="w-1 h-8 bg-green-500 animate-bounce"></div>
+                  <div className="w-1 h-16 bg-green-500 animate-pulse delay-75"></div>
+                  <div className="w-1 h-10 bg-green-500 animate-bounce delay-150"></div>
+                </div>
+                <div className="absolute bottom-1 right-1 text-[8px] text-green-500 font-mono">
+                  STEALTH: ACTIVE
+                </div>
               </div>
             </div>
-          </RetroWindow>
-
-          <div className="retro-border p-4 bg-gray-200 space-y-2">
-            <h4 className="text-[10px] font-bold uppercase underline">Proxy Network</h4>
-            <div className="w-full h-24 bg-black border-2 border-white relative overflow-hidden">
-              <div className="absolute inset-0 flex items-center justify-around opacity-40">
-                <div className="w-1 h-12 bg-green-500 animate-pulse"></div>
-                <div className="w-1 h-8 bg-green-500 animate-bounce"></div>
-                <div className="w-1 h-16 bg-green-500 animate-pulse delay-75"></div>
-                <div className="w-1 h-10 bg-green-500 animate-bounce delay-150"></div>
-              </div>
-              <div className="absolute bottom-1 right-1 text-[8px] text-green-500 font-mono">
-                STEALTH: ACTIVE
-              </div>
-            </div>
-          </div>
-        </aside>
+          </aside>
+        </div>
       </main>
 
-      <footer className="mt-8 flex justify-between items-center bg-[#c0c0c0] retro-border p-1 px-4 text-[10px] font-bold">
-        <div className="flex items-center gap-2">
-          <div className="retro-border px-2 py-0.5 shadow-inner">START</div>
-          <div className="flex gap-2 text-gray-700">
-            <span>[Wallet: {isConnected ? 'ON' : 'OFF'}]</span>
-            <span>[Session: {hasActiveSession ? 'ACTIVE' : 'NONE'}]</span>
-          </div>
+      {/* Footer */}
+      <footer className="mt-auto bg-[#c0c0c0] retro-border border-t-2 border-gray-400 py-1 px-4 flex justify-between items-center text-[10px] font-bold">
+        <div className="flex gap-2 text-gray-700">
+          <span>[Wallet: {isConnected ? 'ON' : 'OFF'}]</span>
+          <span>[Session: {hasActiveSession ? 'ACTIVE' : 'NONE'}]</span>
         </div>
-        <div className="flex gap-4">
+        <div className="flex gap-3">
           <div className="retro-border-inset px-2 flex items-center gap-1">
             <span className={hasActiveSession ? 'text-green-600' : 'text-red-600'}>●</span>
             {hasActiveSession ? 'STEALTH_PROXY' : 'PROXY_IDLE'}
           </div>
-          <div className="retro-border-inset px-2">LAB_BUILD</div>
         </div>
       </footer>
     </div>
