@@ -175,6 +175,7 @@ function generateToken(): string {
 async function verifyTransaction(
   txHash: string,
   userAddress: string,
+  expectedAmount: string,
   env: Env
 ): Promise<RpcResult> {
   try {
@@ -280,17 +281,22 @@ async function verifyTransaction(
       };
     }
 
-    // Check if any Transfer event sends to our proxy wallet
+    // Check if any Transfer event is from our user AND sends to our proxy wallet
     // Event data layout: [from, to, amount]
+    const userLower = userAddress.toLowerCase();
+    const expectedAmountBig = BigInt(expectedAmount);
+
     const validTransfer = transferEvents.some((event) => {
+      const fromAddress = event.data?.[0]?.toLowerCase();
       const toAddress = event.data?.[1]?.toLowerCase();
-      return toAddress === proxyLower;
+      const amount = BigInt(event.data?.[2] || "0");
+      return fromAddress === userLower && toAddress === proxyLower && amount >= expectedAmountBig;
     });
 
     if (!validTransfer) {
       return {
         valid: false,
-        reason: `Transfer not sent to proxy wallet (0x${proxyWallet.slice(-8)})`,
+        reason: `No valid Transfer from user (0x${userAddress.slice(-8)}) to proxy wallet (0x${proxyWallet.slice(-8)}) for expected amount`,
       };
     }
 
@@ -457,9 +463,11 @@ async function handleActivate(
     }
 
     // Verify transaction on-chain (robust: checks events for Transfer from STRK20)
+    const expectedAmountWei = BigInt(Math.floor(body.minutes * parseFloat(env.PRICE_PER_MINUTE) * 1e18));
     const verification = await verifyTransaction(
       body.txHash,
       body.walletAddress,
+      expectedAmountWei.toString(),
       env
     );
 
