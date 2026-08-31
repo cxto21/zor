@@ -57,15 +57,34 @@ function extractAddress(
   return null;
 }
 
+/** Check if the account supports STRK20 wallet API methods */
+function hasStrk20Support(account: any): boolean {
+  return (
+    account &&
+    typeof account === "object" &&
+    typeof account.strk20InvokeTransaction === "function" &&
+    typeof account.strk20Balances === "function"
+  );
+}
+
 const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [address, setAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [wrongNetwork, setWrongNetwork] = useState(false);
+  const [strk20Ready, setStrk20Ready] = useState(false);
 
   const checkNetwork = useCallback((chainId: bigint | undefined) => {
     setWrongNetwork(chainId !== undefined && chainId !== SN_SEPOLIA_CHAIN_ID);
   }, []);
+
+  const initAccount = useCallback((account: any, addr: string, chainId?: bigint) => {
+    setAddress(addr);
+    onAccountChange(account);
+    localStorage.setItem(STORAGE_KEY_ADDRESS, addr);
+    checkNetwork(chainId);
+    setStrk20Ready(hasStrk20Support(account));
+  }, [onAccountChange, checkNetwork]);
 
   useEffect(() => {
     const savedAddress = localStorage.getItem(STORAGE_KEY_ADDRESS);
@@ -99,9 +118,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         );
 
         if (addr && addr.toLowerCase() === savedAddress.toLowerCase() && account) {
-          setAddress(addr);
-          onAccountChange(account);
-          checkNetwork(connectorData?.chainId);
+          initAccount(account, addr, connectorData?.chainId);
         } else {
           localStorage.removeItem(STORAGE_KEY_ADDRESS);
         }
@@ -152,10 +169,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         throw new Error("Could not determine wallet address.");
       }
 
-      setAddress(addr);
-      onAccountChange(account);
-      localStorage.setItem(STORAGE_KEY_ADDRESS, addr);
-      checkNetwork(connectorData?.chainId);
+      initAccount(account, addr, connectorData?.chainId);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (
@@ -182,6 +196,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     setAddress(null);
     setError(null);
     setWrongNetwork(false);
+    setStrk20Ready(false);
     localStorage.removeItem(STORAGE_KEY_ADDRESS);
     onAccountChange(null);
   };
@@ -207,6 +222,11 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
 
       {address ? (
         <div className="flex items-center gap-1.5">
+          {strk20Ready && (
+            <span className="text-[8px] bg-green-600 text-white font-bold px-1.5 py-0.5 rounded" title="Wallet supports STRK20 private payments">
+              🔒 STRK20
+            </span>
+          )}
           <span className="text-[10px] font-mono text-gray-700 bg-white retro-border-inset px-2 py-0.5">
             {truncateAddress(address)}
           </span>

@@ -1,10 +1,10 @@
-# Zor Privacy Network 2026.
-kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+# Zor Proxy Browser 
+
 Observe the ZKrrr. Developed at the first STRK20 Hackathon. 2026. No sinful economic pretensions.
 
-Anonymous web proxy on Starknet with STRK20 micropayments.
+Anonymous web proxy on Starknet with STRK20 micropayments. 
 
-## PoC Architecture
+## Architecture v0.1 (PoC)
 
 - **Frontend**: React + Vite → Cloudflare Pages
 - **Worker**: Cloudflare Worker (proxy + billing + session management)
@@ -15,7 +15,7 @@ Anonymous web proxy on Starknet with STRK20 micropayments.
 Used by the worker to deploy per-user deposit addresses.
 
 ```
-Address:  0x179c3a952b2247a19c9fc5e23ebb6f8478a2efb8f5449557b04b2a4d74888a9
+Address:  0x12f8b399a2eff402e22ea47be559d7e369cb5a18bcb426834a079947018a2d
 Public:   0x7d7425c0bf1d64aa4ed5a13fa2eab80e50826d1470a31e2a6b5b9cf2cbbee1
 Class:    0x061dac032f228abef9c6626f995015233097ae253a7f72d68552db02f2971b8f
 ```

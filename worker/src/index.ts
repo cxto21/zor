@@ -30,6 +30,10 @@ interface Env {
   STRK20_CONTRACT_ADDRESS: string;
   PROXY_WALLET_ADDRESS: string;
   PRICE_PER_MINUTE: string;
+  MASTER_PRIVATE_KEY: string;
+  MASTER_PUBLIC_KEY: string;
+  MASTER_ADDRESS: string;
+  MASTER_ACCOUNT_CLASS_HASH: string;
 }
 
 interface SessionData {
@@ -171,6 +175,119 @@ function generateToken(): string {
 }
 
 // ============================================================================
+// HTML URL Rewriting (Server-Side)
+//
+// Rewrites href, src, action, srcset attributes in HTML to route through proxy.
+// Skips <script> blocks to avoid mangling JS code.
+// ============================================================================
+
+function rewriteHtml(
+  html: string,
+  proxyOrigin: string,
+  targetOrigin: string,
+  token: string
+): string {
+  // Rewrite a single URL attribute value
+  function rewriteUrl(value: string): string {
+    if (!value || value.startsWith("data:") || value.startsWith("javascript:") ||
+        value.startsWith("blob:") || value.startsWith("#") || value.startsWith("mailto:") ||
+        value.startsWith("tel:") || value.startsWith("sms:") ||
+        value.startsWith(proxyOrigin)) {
+      return value;
+    }
+
+    // Resolve relative URLs against target origin
+    let absoluteUrl = value;
+    if (!value.startsWith("http")) {
+      if (value.startsWith("//")) {
+        absoluteUrl = "https:" + value;
+      } else if (value.startsWith("/")) {
+        absoluteUrl = targetOrigin + value;
+      } else {
+        absoluteUrl = targetOrigin + "/" + value;
+      }
+    }
+
+    // Only proxy external URLs (not the proxy itself)
+    if (absoluteUrl.startsWith(proxyOrigin)) return value;
+
+    return proxyOrigin + "/proxy?url=" + encodeURIComponent(absoluteUrl) + "&token=" + token;
+  }
+
+  // Rewrite srcset attribute (comma-separated list of URLs with optional size descriptors)
+  function rewriteSrcset(value: string): string {
+    return value.split(",").map(part => {
+      const trimmed = part.trim();
+      const spaceIdx = trimmed.indexOf(" ");
+      if (spaceIdx === -1) return rewriteUrl(trimmed);
+      const url = trimmed.slice(0, spaceIdx);
+      const descriptor = trimmed.slice(spaceIdx);
+      return rewriteUrl(url) + descriptor;
+    }).join(", ");
+  }
+
+  // Process HTML: rewrite attributes but skip <script> content
+  let result = "";
+  let i = 0;
+
+  while (i < html.length) {
+    // Look for <script> blocks — skip their content
+    const scriptOpen = html.indexOf("<script", i);
+    if (scriptOpen === -1) {
+      // No more script tags — rewrite the rest
+      result += rewriteAttrs(html.slice(i), proxyOrigin, rewriteUrl, rewriteSrcset);
+      break;
+    }
+
+    // Rewrite content before <script>
+    result += rewriteAttrs(html.slice(i, scriptOpen), proxyOrigin, rewriteUrl, rewriteSrcset);
+
+    // Find the end of the script opening tag
+    const scriptTagEnd = html.indexOf(">", scriptOpen);
+    if (scriptTagEnd === -1) {
+      result += html.slice(scriptOpen);
+      break;
+    }
+
+    // Include the opening script tag as-is
+    result += html.slice(scriptOpen, scriptTagEnd + 1);
+
+    // Find </script>
+    const scriptClose = html.indexOf("</script>", scriptTagEnd + 1);
+    if (scriptClose === -1) {
+      // No closing tag — skip rest
+      result += html.slice(scriptTagEnd + 1);
+      break;
+    }
+
+    // Skip script content entirely (don't rewrite URLs inside JS)
+    i = scriptClose; // </script> will be included in next iteration
+  }
+
+  return result;
+}
+
+// Rewrite URL attributes in a chunk of HTML (non-script content)
+function rewriteAttrs(
+  chunk: string,
+  proxyOrigin: string,
+  rewriteUrl: (url: string) => string,
+  rewriteSrcset: (value: string) => string
+): string {
+  // Match tag attributes: href="...", src="...", action="...", srcset="..."
+  return chunk.replace(
+    /(<\w+[^>]*?)(\b(?:href|src|action|srcset)\s*=\s*)(["'])(.*?)\3/gi,
+    (match, prefix, attr, quote, value) => {
+      const attrName = attr.trim().split(/\s/)[0].toLowerCase();
+      const rewritten = attrName === "srcset"
+        ? rewriteSrcset(value)
+        : rewriteUrl(value);
+      return prefix + attr + quote + rewritten + quote;
+    }
+  );
+}
+
+// ============================================================================
 // Deposit Address Generation & Balance Verification
 //
 // New flow for STRK20 privacy compatibility:
@@ -180,22 +297,24 @@ function generateToken(): string {
 // ============================================================================
 
 // Derive a deterministic deposit address from user wallet + salt
-function deriveDepositAddress(userWallet: string, salt: string): string {
-  // Use Starknet-compatible address derivation
-  // Hash: keccak256(user_wallet + salt) → take last 252 bits (Starknet field)
+// Uses SHA-256 via Web Crypto API — produces a valid felt252 (< 2^252)
+async function deriveDepositAddress(
+  userWallet: string,
+  salt: string
+): Promise<string> {
   const encoder = new TextEncoder();
-  const data = encoder.encode(userWallet.toLowerCase() + salt);
-  // Simple hash using SubtleCrypto (synchronous via workaround for Worker env)
-  let hash = 0;
-  for (let i = 0; i < data.length; i++) {
-    const char = data[i];
-    hash = ((hash << 5) - hash + char) | 0;
-  }
-  // Create a deterministic but unique address-like hex string
-  const hashHex = Math.abs(hash).toString(16).padStart(8, "0");
-  // Starknet addresses are 64 hex chars (32 bytes)
-  // Use a prefix that looks like a contract address
-  return "0x" + hashHex.repeat(8).slice(0, 63) + "1"; // last byte 1 to avoid zero
+  const data = encoder.encode(userWallet.toLowerCase() + ":" + salt);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = new Uint8Array(hashBuffer);
+
+  // Starknet field prime: 2^252 + 17 * 2^192 + 1
+  // Ensure the result is within the field by taking last 31 bytes (248 bits < 2^252)
+  const fieldBytes = hashArray.slice(1, 32); // 31 bytes = 248 bits, safely within field
+  const hex = Array.from(fieldBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  // Pad to 64 hex chars (32 bytes) for Starknet address format
+  return "0x" + hex.padStart(64, "0");
 }
 
 // Check STRK balance of an address via ERC20 balanceOf
@@ -206,8 +325,10 @@ async function checkBalance(
   expectedWei: bigint
 ): Promise<{ valid: boolean; balance?: string; reason?: string }> {
   try {
-    // balanceOf(address) selector = 0x2ff2eaa9d703426b
-    const addressPadded = address.toLowerCase().replace("0x", "").padStart(64, "0");
+    // balanceOf(address) selector = starknet_keccak('balanceOf') & MASK_250
+    // keccak256('balanceOf') = 0xe2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e
+    // & MASK_250 (lower 250 bits) = 0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e
+    const addressPadded = "0x" + address.toLowerCase().replace("0x", "").padStart(64, "0");
     const calldata = [addressPadded];
 
     const result = await rpcCall(
@@ -216,7 +337,7 @@ async function checkBalance(
       [
         {
           contract_address: strkContract,
-          entry_point_selector: "0x02ff2eaa9d703426b6fc235bdb9d6a0c36dea1db3e5536d0f3c0f32438e73846",
+          entry_point_selector: "0x2e4263afad30923c891518314c3c95dbe830a16874e8abc5777a9a20b54c76e",
           calldata,
         },
         "latest",
@@ -224,7 +345,8 @@ async function checkBalance(
       1
     );
 
-    // Result is an array of felts — balance is the first element
+    // Result is an array of felts — STRK ERC20 returns u256 (low, high)
+    // Balance is in the first element (low part of u256)
     const balanceHex = (result as string[])?.[0] || "0x0";
     const balance = BigInt(balanceHex);
 
@@ -377,34 +499,279 @@ function buildCleanHeaders(
   return clean;
 }
 
+// ============================================================================
+// Service Worker — intercepts all fetch() in the proxied iframe
+// ============================================================================
+
+function getServiceWorkerScript(proxyOrigin: string): string {
+  return `
+// Zor Proxy Service Worker - intercepts fetch() and routes through proxy
+const PROXY_ORIGIN = "${proxyOrigin}";
+
+self.addEventListener("fetch", (event) => {
+  const url = new URL(event.request.url);
+
+  // Only intercept requests to external origins (not the proxy itself)
+  if (url.origin === PROXY_ORIGIN) return;
+
+  // Skip chrome-extension, blob:, data:, etc.
+  if (!url.protocol.startsWith("http")) return;
+
+  // Build proxy URL
+  const target = url.href;
+  const token = new URLSearchParams(self.location.search).get("token") || "";
+  const proxyUrl = PROXY_ORIGIN + "/proxy?url=" + encodeURIComponent(target) +
+    "&token=" + token;
+
+  event.respondWith(
+    fetch(proxyUrl, {
+      method: event.request.method,
+      headers: event.request.headers,
+      body: event.request.method !== "GET" && event.request.method !== "HEAD"
+        ? event.request.body : undefined,
+      redirect: "follow",
+    }).catch(() => new Response("Proxy fetch failed", { status: 502 }))
+  );
+});
+`;
+}
+
+// Injector script - injected into HTML <head> to intercept all fetch/XHR
+function getInjectorScript(proxyOrigin: string): string {
+  return `<script>
+(function() {
+  var PROXY = "${proxyOrigin}";
+  var params = new URLSearchParams(window.location.search);
+  var TOKEN = params.get("token") || "";
+  var TARGET = params.get("url") || "";
+  var TARGET_ORIGIN = "";
+  try { TARGET_ORIGIN = new URL(TARGET).origin; } catch(e) {}
+
+  function proxyUrl(url) {
+    if (!url || url.startsWith(PROXY)) return url;
+    if (!url.startsWith("http")) {
+      // Resolve relative URL against the TARGET origin, not the proxy
+      try { url = new URL(url, TARGET).href; } catch(e) { return url; }
+    }
+    return PROXY + "/proxy?url=" + encodeURIComponent(url) + "&token=" + TOKEN;
+  }
+
+  // Override fetch()
+  var origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var url = typeof input === "string" ? input : input?.url;
+    if (url) {
+      var proxied = proxyUrl(url);
+      if (typeof input === "string") input = proxied;
+      else if (input instanceof Request) input = new Request(proxied, input);
+      else input.url = proxied;
+    }
+    return origFetch.call(this, input, init);
+  };
+
+  // Override XMLHttpRequest.open()
+  var origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    if (url && typeof url === "string") {
+      arguments[1] = proxyUrl(url);
+    }
+    return origOpen.apply(this, arguments);
+  };
+
+  // Override Element.setAttribute for src/href attributes
+  var origSetAttr = Element.prototype.setAttribute;
+  Element.prototype.setAttribute = function(name, value) {
+    if ((name === "src" || name === "href") && value && typeof value === "string") {
+      if (value.startsWith("http") && !value.startsWith(PROXY)) {
+        value = proxyUrl(value);
+      }
+    }
+    return origSetAttr.call(this, name, value);
+  };
+
+  // Override createElement to patch script/link/img src
+  var origCreate = document.createElement.bind(document);
+  document.createElement = function(tag) {
+    var el = origCreate(tag);
+    var origSrc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, "src");
+    var origHref = Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype, "href");
+    if (origSrc) {
+      Object.defineProperty(el, "src", {
+        get: function() { return origSrc.get.call(this); },
+        set: function(v) { return origSrc.set.call(this, proxyUrl(v)); }
+      });
+    }
+    if (origHref) {
+      Object.defineProperty(el, "href", {
+        get: function() { return origHref.get.call(this); },
+        set: function(v) { return origHref.set.call(this, proxyUrl(v)); }
+      });
+    }
+    return el;
+  };
+
+  // === CLICK INTERCEPTOR — keeps navigation inside the proxy ===
+  // Catches clicks on <a href="..."> and <form action="..."> and redirects
+  // them through the proxy instead of navigating the iframe to the target.
+  document.addEventListener("click", function(e) {
+    // Find the closest <a> or <form> ancestor
+    var el = e.target;
+    while (el && el !== document) {
+      if (el.tagName === "A") {
+        var href = el.getAttribute("href");
+        if (!href || href === "#" || href.startsWith("javascript:") || href.startsWith("mailto:") || href.startsWith("tel:")) return;
+        e.preventDefault();
+        var resolved = proxyUrl(href);
+        window.location.href = resolved;
+        return;
+      }
+      if (el.tagName === "FORM") {
+        var action = el.getAttribute("action") || window.location.href;
+        e.preventDefault();
+        var form = el;
+        var formData = new FormData(form);
+        var method = (form.getAttribute("method") || "GET").toUpperCase();
+        var resolvedAction = proxyUrl(action);
+
+        if (method === "GET") {
+          var qs = new URLSearchParams(formData).toString();
+          window.location.href = resolvedAction + (resolvedAction.includes("?") ? "&" : "?") + qs;
+        } else {
+          // POST — submit via fetch then navigate to result
+          fetch(resolvedAction, { method: "POST", body: formData })
+            .then(function(r) { return r.text(); })
+            .then(function(html) {
+              document.open();
+              document.write(html);
+              document.close();
+            });
+        }
+        return;
+      }
+      el = el.parentNode;
+    }
+  }, true); // useCapture = true to catch before page handlers
+})();
+</script>`;
+}
+
 async function proxyRequest(
   targetUrl: string,
   incomingRequest: Request
 ): Promise<Response> {
   const url = new URL(targetUrl);
+  const incomingUrl = new URL(incomingRequest.url);
+  const token = incomingUrl.searchParams.get("token") || "";
 
   // Build clean headers — only safe headers forwarded, all cf-* stripped
   const headers = buildCleanHeaders(incomingRequest.headers, url.hostname);
 
-  // Use stealth-fetch to bypass Cloudflare cf-* header injection
-  const response = await stealthRequest(targetUrl, {
-    method: incomingRequest.method,
-    headers: Object.fromEntries(headers),
-    body:
-      incomingRequest.method !== "GET" && incomingRequest.method !== "HEAD"
-        ? incomingRequest.body
-        : undefined,
-    redirect: "follow",
-  });
+  let response: Response;
 
-  // Build response with CORS headers
-  const responseHeaders = new Headers(response.headers);
+  try {
+    // Try stealth-fetch first (raw TCP, bypasses cf-* header injection)
+    response = await stealthRequest(targetUrl, {
+      method: incomingRequest.method,
+      headers: Object.fromEntries(headers),
+      body:
+        incomingRequest.method !== "GET" && incomingRequest.method !== "HEAD"
+          ? incomingRequest.body
+          : undefined,
+      redirect: "follow",
+    });
+  } catch (stealthError) {
+    // NAT64/raw socket may fail — fall back to regular fetch
+    // This loses stealth (cf-* headers may be injected) but keeps the proxy working
+    console.warn("stealth-fetch failed, falling back to regular fetch:", String(stealthError));
+    response = await fetch(targetUrl, {
+      method: incomingRequest.method,
+      headers: Object.fromEntries(headers),
+      body:
+        incomingRequest.method !== "GET" && incomingRequest.method !== "HEAD"
+          ? incomingRequest.body
+          : undefined,
+      redirect: "follow",
+    });
+  }
+
+  // Build response with CORS headers — sanitize to avoid Invalid header value errors
+  const responseHeaders = new Headers();
+
+  // Copy headers from upstream — handle both Headers API and plain objects (stealth-fetch)
+  const srcHeaders = response?.headers;
+  if (srcHeaders) {
+    // Convert to entries regardless of type
+    let entries: [string, string][];
+    if (typeof srcHeaders.entries === "function") {
+      entries = [...srcHeaders.entries()];
+    } else if (typeof srcHeaders === "object") {
+      entries = Object.entries(srcHeaders) as [string, string][];
+    } else {
+      entries = [];
+    }
+
+    for (const [key, value] of entries) {
+      if (typeof value !== "string") continue;
+      if (/[\x00-\x08\x0a-\x1f\x7f\x80-\xff]/.test(value)) continue;
+      if (/[\x00-\x08\x0a-\x1f\x7f\x80-\xff]/.test(key)) continue;
+      try { responseHeaders.set(key, value); } catch {}
+    }
+  }
+
   responseHeaders.set("Access-Control-Allow-Origin", "*");
   responseHeaders.set("X-Proxy-By", "ZOR-STRK20-Proxy");
 
   // Remove security headers that block iframe embedding
   responseHeaders.delete("x-frame-options");
   responseHeaders.delete("content-security-policy");
+
+  // Get the proxy origin for the Service Worker
+  const proxyOrigin = new URL(incomingRequest.url).origin;
+
+  // For HTML responses: rewrite URLs server-side + inject client-side interceptor
+  const contentType = responseHeaders.get("content-type") || "";
+  if (contentType.includes("text/html")) {
+    let html = await response.text();
+    const targetOrigin = new URL(targetUrl).origin;
+
+    // 1) Server-side URL rewriting — rewrite href, src, action, srcset in HTML
+    //    Skips <script> blocks to avoid mangling JS code
+    html = rewriteHtml(html, proxyOrigin, targetOrigin, token);
+
+    // 2) Client-side interceptor — catches dynamically constructed URLs
+    const injector = getInjectorScript(proxyOrigin);
+    const dtIdx = html.indexOf("<!DOCTYPE");
+    const dtLower = html.indexOf("<!doctype");
+    const idx = dtIdx !== -1 ? dtIdx : dtLower;
+    if (idx !== -1) {
+      const endOfDoctype = html.indexOf(">", idx);
+      if (endOfDoctype !== -1) {
+        html = html.slice(0, endOfDoctype + 1) + injector + html.slice(endOfDoctype + 1);
+      } else {
+        html = injector + html;
+      }
+    } else {
+      const htmlTag = html.indexOf("<html");
+      const headTag = html.indexOf("<head");
+      const bodyTag = html.indexOf("<body");
+      const tags = [htmlTag, headTag, bodyTag].filter(t => t !== -1);
+      if (tags.length > 0) {
+        const insertAt = Math.min(...tags);
+        html = html.slice(0, insertAt) + injector + html.slice(insertAt);
+      } else {
+        html = injector + html;
+      }
+    }
+
+    responseHeaders.delete("content-length");
+    responseHeaders.delete("content-encoding");
+
+    return new Response(html, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  }
 
   return new Response(response.body, {
     status: response.status,
@@ -416,6 +783,250 @@ async function proxyRequest(
 // ============================================================================
 // Route Handlers
 // ============================================================================
+
+interface DeployRequest {
+  depositAddress: string;
+  walletAddress: string;
+}
+
+// POST /deploy — Derive account parameters for deployment
+// The frontend uses starknet.js to sign and broadcast the deploy transaction
+async function handleDeploy(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    const body = (await request.json()) as DeployRequest;
+
+    if (!body.depositAddress || !body.walletAddress) {
+      return errorResponse("Missing required fields: depositAddress, walletAddress");
+    }
+
+    if (!env.MASTER_PRIVATE_KEY || !env.MASTER_ADDRESS || !env.MASTER_ACCOUNT_CLASS_HASH) {
+      return errorResponse("Master account not configured", 500);
+    }
+
+    // Import deploy helpers
+    const { deriveUserPrivKey, privateKeyToPublicKey, computeAccountAddress, hexToBigInt, bigIntToHex, padHex } = await import("./starknet-deploy");
+
+    // Derive a unique private key for this user
+    const privKey = await deriveUserPrivKey(body.walletAddress);
+
+    // Compute public key and account address
+    const pubKey = privateKeyToPublicKey(privKey);
+    const classHash = hexToBigInt(env.MASTER_ACCOUNT_CLASS_HASH);
+    const masterAddress = hexToBigInt(env.MASTER_ADDRESS);
+    const salt = privKey;
+
+    const accountAddress = computeAccountAddress(pubKey, classHash, salt, masterAddress);
+
+    // Return all parameters needed for the frontend to deploy via starknet.js
+    return jsonResponse({
+      success: true,
+      accountAddress: padHex(bigIntToHex(accountAddress), 32),
+      publicKey: bigIntToHex(pubKey),
+      classHash: env.MASTER_ACCOUNT_CLASS_HASH,
+      salt: bigIntToHex(salt),
+      masterAddress: env.MASTER_ADDRESS,
+      message: "Use starknet.js to deploy: new Account(provider, {address, classHash, signers: [{privateKey}]}).deployAccount({classHash, address, constructor: [publicKey], signers: [{privateKey}]})",
+    });
+  } catch (error) {
+    return errorResponse(`Deploy failed: ${error}`, 500);
+  }
+}
+
+// POST /fund-account — Fund a deployed account from the master account
+// Uses the master account to send STRK to the new account
+async function handleFundAccount(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    const body = (await request.json()) as {
+      accountAddress: string;
+      amount: string; // STRK amount in wei
+    };
+
+    if (!body.accountAddress || !body.amount) {
+      return errorResponse("Missing required fields: accountAddress, amount");
+    }
+
+    if (!env.MASTER_PRIVATE_KEY || !env.MASTER_ADDRESS) {
+      return errorResponse("Master account not configured", 500);
+    }
+
+    // Import deploy helpers
+    const { buildInvokeTx, hexToBigInt, bigIntToHex, padHex } = await import("./starknet-deploy");
+
+    // Build ERC20 transfer from master to new account
+    // transfer(to, amount) selector = 0x2386f26fc10000
+    const calldata = [
+      "0x1", // array length
+      env.STRK20_CONTRACT_ADDRESS, // contract address
+      "0x2386f26fc10000", // transfer selector
+      "0x3", // calldata length
+      padHex(body.accountAddress, 32), // recipient
+      body.amount, // amount low
+      "0x0", // amount high
+    ];
+
+    // Get current nonce (v0.10: params = [block_id, address])
+    const nonceResponse = await fetch(env.STARKNET_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "starknet_getNonce",
+        params: ["latest", env.MASTER_ADDRESS],
+      }),
+    });
+
+    const nonceData = await nonceResponse.json() as any;
+    if (nonceData.error) {
+      return errorResponse(`Nonce fetch failed: ${nonceData.error.message}`);
+    }
+    const nonce = nonceData.result;
+
+    // Build and sign the invoke transaction
+    const masterPrivKey = hexToBigInt(env.MASTER_PRIVATE_KEY);
+    const { tx: signedTx } = await buildInvokeTx({
+      privKey: masterPrivKey,
+      senderAddress: env.MASTER_ADDRESS,
+      calldata,
+      nonce,
+      maxFee: "0x100000000000000",
+      chainId: "0x534e5f5345504f4c4941", // Sepolia
+    });
+
+    // Broadcast
+    const broadcastResponse = await fetch(env.STARKNET_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "starknet_addInvokeTransaction",
+        params: [signedTx],
+      }),
+    });
+
+    const broadcastData = await broadcastResponse.json() as any;
+
+    if (broadcastData.error) {
+      return errorResponse(`Fund broadcast failed: ${broadcastData.error.message} | tx: ${JSON.stringify(signedTx).slice(0, 500)}`);
+    }
+
+    return jsonResponse({
+      success: true,
+      txHash: broadcastData.result,
+      message: "Account funded successfully",
+    });
+  } catch (error) {
+    return errorResponse(`Fund account failed: ${error}`, 500);
+  }
+}
+
+// POST /verify-deposit — Verify a privacy pool deposit via on-chain tx receipt
+async function handleVerifyDeposit(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    const body = (await request.json()) as {
+      txHash: string;
+      walletAddress: string;
+      expectedAmount: string;
+    };
+
+    if (!body.txHash || !body.walletAddress || !body.expectedAmount) {
+      return errorResponse("Missing required fields: txHash, walletAddress, expectedAmount");
+    }
+
+    // Get transaction receipt
+    const receiptResponse = await fetch(env.STARKNET_RPC_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "starknet_getTransactionReceipt",
+        params: [body.txHash],
+      }),
+    });
+
+    const receiptData = await receiptResponse.json() as any;
+
+    if (receiptData.error) {
+      return jsonResponse({
+        success: true,
+        verified: false,
+        error: `RPC error: ${receiptData.error.message}`,
+      });
+    }
+
+    const receipt = receiptData.result;
+    if (!receipt) {
+      return jsonResponse({
+        success: true,
+        verified: false,
+        error: "Transaction not found",
+      });
+    }
+
+    if (receipt.execution_status !== "SUCCEEDED") {
+      return jsonResponse({
+        success: true,
+        verified: false,
+        error: `Transaction failed: ${receipt.execution_status}`,
+      });
+    }
+
+    // Look for Deposit event from the privacy pool contract
+    // Deposit event key: starknet_keccak("Deposit")
+    const DEPOSIT_EVENT_KEY = "0x1b6bb2860d54a8f1c1d83020a99022824ce801a14c66f19a2623a2ea8152a8";
+
+    const events = receipt.events || [];
+    const depositEvent = events.find(
+      (e: any) =>
+        e.from_address === "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91" &&
+        e.keys?.[0] === DEPOSIT_EVENT_KEY
+    );
+
+    if (!depositEvent) {
+      return jsonResponse({
+        success: true,
+        verified: false,
+        error: "Deposit event not found in transaction",
+      });
+    }
+
+    // Event structure: [event_key, depositor_addr, token_addr, amount_low, amount_high]
+    const depositor = depositEvent.keys?.[1];
+    const amountLow = parseInt(depositEvent.data?.[0] || "0", 16);
+    const amountHigh = parseInt(depositEvent.data?.[1] || "0", 16);
+    const amount = BigInt(amountLow) + (BigInt(amountHigh) << BigInt(128));
+
+    // Verify depositor matches
+    const normalizedDepositor = depositor?.toLowerCase();
+    const normalizedWallet = body.walletAddress.toLowerCase();
+    if (normalizedDepositor !== normalizedWallet) {
+      return jsonResponse({
+        success: true,
+        verified: false,
+        error: "Depositor address mismatch",
+      });
+    }
+
+    return jsonResponse({
+      success: true,
+      verified: true,
+      amount: amount.toString(),
+    });
+  } catch (error) {
+    return errorResponse(`Verify deposit failed: ${error}`, 500);
+  }
+}
 
 // POST /deposit-address — Generate unique deposit address for user
 async function handleDepositAddress(
@@ -436,7 +1047,7 @@ async function handleDepositAddress(
     }
 
     const salt = generateToken().slice(0, 16);
-    const depositAddress = deriveDepositAddress(body.walletAddress, salt);
+    const depositAddress = await deriveDepositAddress(body.walletAddress, salt);
 
     const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE);
     const expectedStrk = body.minutes * pricePerMinute;
@@ -657,12 +1268,36 @@ export default {
       return handleDepositAddress(request, env);
     }
 
+    if (path === "/deploy" && request.method === "POST") {
+      return handleDeploy(request, env);
+    }
+
+    if (path === "/fund-account" && request.method === "POST") {
+      return handleFundAccount(request, env);
+    }
+
+    if (path === "/verify-deposit" && request.method === "POST") {
+      return handleVerifyDeposit(request, env);
+    }
+
     if (path === "/activate" && request.method === "POST") {
       return handleActivate(request, env);
     }
 
     if (path === "/proxy" && request.method === "GET") {
       return handleProxy(request, env);
+    }
+
+    // Service Worker endpoint — must be same-origin as the proxied page
+    if (path === "/sw.js") {
+      const proxyOrigin = url.origin;
+      return new Response(getServiceWorkerScript(proxyOrigin), {
+        headers: {
+          "Content-Type": "application/javascript; charset=utf-8",
+          "Cache-Control": "no-cache",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
     }
 
     if (path === "/status") {

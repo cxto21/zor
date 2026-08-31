@@ -13,6 +13,8 @@
     "wrangler": "^4.0.0"
   },
   "dependencies": {
+    "@scure/starknet": "^2.4.0",
+    "starknet": "^10.7.1",
     "stealth-fetch": "^0.2.2"
   }
 }

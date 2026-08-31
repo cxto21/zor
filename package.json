@@ -9,9 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^1.34.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "starknet": "^10.7.1",
     "starknetkit": "^3.4.2"
   },
   "devDependencies": {
