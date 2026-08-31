@@ -1,7 +1,5 @@
-# Zor Proxy Worker
-
-Privacy-preserving web proxy for the Zor anonymous browsing network.
-
+# Zor Proxy Worker!
+Privacy-preserving web proxy for the Zor anonymous browsing network.!!!!mandale !!!!!!no se que onda esta piola
 ## Architecture
 
 ```
