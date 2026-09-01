@@ -57,41 +57,81 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
 
   /** Get the raw wallet extension (Ready/X) for STRK20 methods */
   function getRawWallet(): any {
-    // Try multiple selectors that wallets use
+    // The real wallet extension is NOT window.starknet (that's starknetkit's wrapper).
+    // The real wallet is a StarknetWindowObject with request() and standard:connect.
+    // Scan ALL window properties to find it.
+
+    console.log('[ZOR] Scanning window for wallet extensions...');
     const candidates: [string, any][] = [];
-    const selectors: [string, () => any][] = [
-      ['window.starknet', () => (window as any)?.starknet],
-      ['window.starknetWallet', () => (window as any)?.starknetWallet],
-      ['window.ready', () => (window as any)?.ready],
-      ['window.argent', () => (window as any)?.argent],
-      ['document.querySelector #starknet', () => {
-        const el = document.querySelector('[id*="starknet"]');
-        return el ? (el as any).wallet || (el as any).__wallet : null;
-      }],
-    ];
-    for (const [name, sel] of selectors) {
+
+    // Check common injection points
+    const knownKeys = Object.keys(window).filter(k =>
+      k.toLowerCase().includes('stark') ||
+      k.toLowerCase().includes('wallet') ||
+      k.toLowerCase().includes('ready') ||
+      k.toLowerCase().includes('argent') ||
+      k.toLowerCase().includes('braavos')
+    );
+    console.log('[ZOR] Window keys matching wallet patterns:', knownKeys);
+
+    // Check each known key
+    for (const key of knownKeys) {
       try {
-        const w = sel();
-        if (w) {
-          console.log(`[ZOR] Found ${name}:`, {
-            type: typeof w,
-            constructor: w?.constructor?.name,
-            keys: Object.keys(w).slice(0, 15),
-            hasEnable: typeof w?.enable,
-            hasRequest: typeof w?.request,
-            has selectedAddress: typeof w?.selectedAddress,
-            has account: typeof w?.account,
+        const obj = (window as any)[key];
+        if (obj && typeof obj === 'object' && typeof obj.request === 'function') {
+          console.log(`[ZOR] ${key}:`, {
+            type: typeof obj,
+            constructor: obj?.constructor?.name,
+            hasRequest: true,
+            hasEnable: typeof obj.enable,
+            hasSelectedAddress: typeof obj.selectedAddress,
+            keys: Object.keys(obj).slice(0, 15),
           });
-          candidates.push([name, w]);
+          candidates.push([key, obj]);
         }
       } catch {}
     }
+
+    // Also check window.starknet in detail
+    const sn = (window as any)?.starknet;
+    if (sn) {
+      console.log('[ZOR] window.starknet detail:', {
+        type: typeof sn,
+        constructor: sn?.constructor?.name,
+        keys: Object.keys(sn),
+        hasRequest: typeof sn?.request,
+        hasEnable: typeof sn?.enable,
+        hasAccount: typeof sn?.account,
+        accountKeys: sn?.account ? Object.keys(sn.account) : [],
+        accountProto: sn?.account ? Object.getOwnPropertyNames(Object.getPrototypeOf(sn.account)).slice(0, 20) : [],
+      });
+
+      // Check if starknet.account is the real wallet
+      if (sn.account && typeof sn.account === 'object' && typeof sn.account.request === 'function') {
+        console.log('[ZOR] window.starknet.account has request() — might be the real wallet');
+        candidates.push(['starknet.account', sn.account]);
+      }
+
+      // Check starknet._wallet or similar internal properties
+      for (const internalKey of ['_wallet', 'wallet', '_provider', 'provider', '_connector', 'connector']) {
+        if (sn[internalKey] && typeof sn[internalKey] === 'object' && typeof sn[internalKey].request === 'function') {
+          console.log(`[ZOR] window.starknet.${internalKey} has request() — might be real wallet`);
+          candidates.push([`starknet.${internalKey}`, sn[internalKey]]);
+        }
+      }
+    }
+
     if (candidates.length === 0) {
-      console.warn('[ZOR] No raw wallet found. Window keys with stark/wallet:', Object.keys(window).filter(k => k.toLowerCase().includes('stark') || k.toLowerCase().includes('wallet') || k.toLowerCase().includes('ready')));
+      console.warn('[ZOR] No wallet extensions found with request() method');
       return null;
     }
-    // Prefer the one that looks like a wallet extension
-    return candidates[0][1];
+
+    // Prefer candidates that look like raw wallet extensions (have enable or standard:connect)
+    const best = candidates.find(([, w]) => typeof w.enable === 'function' || typeof w['standard:connect'] === 'function')
+      || candidates[0];
+
+    console.log('[ZOR] Selected wallet:', best[0]);
+    return best[1];
   }
 
   /** Create WalletAccountV6 with STRK20 support from raw wallet */
