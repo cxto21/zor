@@ -8,6 +8,7 @@ import {
   activateSession,
   checkSession,
   getProxyUrl,
+  hasStrk20Support,
   PROXY_WALLET,
   PRICE_PER_MINUTE,
   STRK20_CONTRACT,
@@ -30,6 +31,7 @@ const App: React.FC = () => {
   const [status, setStatus] = useState<string>('');
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [sessionBalance, setSessionBalance] = useState<string | null>(null);
+  const [strk20Supported, setStrk20Supported] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [timeRemaining, setTimeRemaining] = useState<string>('');
   const [browserLoading, setBrowserLoading] = useState<boolean>(false);
@@ -102,80 +104,86 @@ const App: React.FC = () => {
     if (!account || !depositAddress || !depositAmount) return;
 
     setIsLoading(true);
-    setStatus('Sending STRK from wallet...');
+    setStatus(strk20Supported ? 'Sending STRK20 private transfer...' : 'Sending STRK from wallet...');
 
     try {
       const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 1e18));
+      const amountHex = '0x' + amountWei.toString(16);
+      const recipientHex = depositAddress.toLowerCase();
 
-      // Split amount into low/high parts for felt252 (max 128 bits each)
-      const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
-      const amountHigh = amountWei >> BigInt(128);
+      let txHash: string | null = null;
 
-      // Pad deposit address to 64 hex chars (32 bytes) for Starknet
-      const paddedAddress = depositAddress.toLowerCase().replace('0x', '').padStart(64, '0');
-
-      // Try V3 transaction first (default for starknet.js v10)
-      let result: any = null;
-      let lastError: any = null;
-
-      // Attempt 1: V3 with explicit resource bounds
-      try {
-        result = await account.execute(
-          {
-            contractAddress: STRK20_CONTRACT,
-            entrypoint: 'transfer',
-            calldata: [
-              '0x' + paddedAddress,
-              '0x' + amountLow.toString(16),
-              '0x' + amountHigh.toString(16),
-            ]
-          },
-          {
-            version: 0x3,
-            resourceBounds: {
-              l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
-              l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
-              l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
-            }
+      if (strk20Supported && typeof account.strk20InvokeTransaction === 'function') {
+        // STRK20 private transfer via wallet API (from shielded balance)
+        setStatus('Generating ZK proof via wallet...');
+        try {
+          const result = await account.strk20InvokeTransaction([
+            {
+              type: 'transfer',
+              token: STRK20_CONTRACT,
+              amount: amountHex,
+              recipient: recipientHex,
+            },
+          ]);
+          txHash = result?.transaction_hash || null;
+          if (!txHash) {
+            // Ready X wallet bug: tx submitted but no hash returned
+            setStatus('STRK20 transfer submitted. Check wallet for status.');
           }
-        );
-      } catch (e1) {
-        lastError = e1;
-        console.warn('V3 tx failed, trying V1 with maxFee:', e1);
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          if (msg.includes('WALLET_TIMEOUT') || msg.includes('timeout')) {
+            setStatus('STRK20 transfer submitted (wallet timeout). Proceeding...');
+          } else if (msg.includes('USER_REFUSED') || msg.includes('user declined') || msg.includes('user rejected')) {
+            setStatus('Payment cancelled by user.');
+            setPayStep('deposit');
+            setIsLoading(false);
+            return;
+          } else {
+            throw e;
+          }
+        }
+      } else {
+        // Fallback: plain ERC20 transfer
+        const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
+        const amountHigh = amountWei >> BigInt(128);
+        const paddedAddress = depositAddress.toLowerCase().replace('0x', '').padStart(64, '0');
 
-        // Attempt 2: V1 with maxFee (fallback for older wallets)
+        let result: any = null;
         try {
           result = await account.execute(
             {
               contractAddress: STRK20_CONTRACT,
               entrypoint: 'transfer',
-              calldata: [
-                '0x' + paddedAddress,
-                '0x' + amountLow.toString(16),
-                '0x' + amountHigh.toString(16),
-              ]
+              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)],
+            },
+            { version: 0x3, resourceBounds: {
+              l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
+              l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
+              l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
+            }}
+          );
+        } catch {
+          result = await account.execute(
+            {
+              contractAddress: STRK20_CONTRACT,
+              entrypoint: 'transfer',
+              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)],
             },
             { version: 0x1, maxFee: '0x1600000' }
           );
-        } catch (e2) {
-          lastError = e2;
-          console.warn('V1 also failed:', e2);
         }
+        txHash = result?.transaction_hash || null;
       }
 
-      if (!result) {
-        throw lastError || new Error('Failed to send transaction');
+      if (txHash) {
+        setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for confirmation...`);
+        await new Promise(resolve => setTimeout(resolve, 8000));
       }
 
-      const txHash = result.transaction_hash;
-      setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for confirmation...`);
-
-      // Wait for tx to be indexed
-      await new Promise(resolve => setTimeout(resolve, 8000));
-
-      // Now activate
+      // Activate session (for STRK20 pool transfers, worker trusts wallet confirmation)
       setPayStep('funded');
-      setStatus('Verifying balance on-chain...');
+      setStatus('Verifying and activating session...');
 
       const activation = await activateSession(
         account.address || account.selectedAddress,
@@ -189,7 +197,7 @@ const App: React.FC = () => {
         setPayStep('idle');
         setDepositAddress(null);
         setDepositAmount(null);
-        setStatus('SESSION ACTIVE');
+        setStatus(strk20Supported ? 'SESSION ACTIVE (STRK20 Private)' : 'SESSION ACTIVE');
         setViewMode('browse');
 
         localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
@@ -451,6 +459,11 @@ const App: React.FC = () => {
           {!isConnected && (
             <p className="text-[10px] text-red-600 font-bold">Connect your Starknet wallet to proceed.</p>
           )}
+          {isConnected && strk20Supported && (
+            <p className="text-[9px] text-green-600 font-bold">
+              🔒 Ready wallet detected — payments use STRK20 private transfers.
+            </p>
+          )}
         </div>
       )}
 
@@ -475,7 +488,7 @@ const App: React.FC = () => {
             disabled={isLoading}
             className="retro-border retro-button bg-blue-700 text-white px-6 py-3 text-xs font-bold uppercase w-full disabled:opacity-50"
           >
-            {isLoading ? 'SENDING...' : `SEND ${depositAmount} STRK & ACTIVATE`}
+            {isLoading ? 'SENDING...' : strk20Supported ? `🔒 SEND ${depositAmount} STRK20 PRIVATE` : `SEND ${depositAmount} STRK & ACTIVATE`}
           </button>
 
           {/* Fallback: manual send */}
@@ -590,6 +603,7 @@ const App: React.FC = () => {
 
           <WalletConnect onAccountChange={(acc) => {
             setAccount(acc);
+            setStrk20Supported(hasStrk20Support(acc));
           }} />
         </div>
       </nav>
