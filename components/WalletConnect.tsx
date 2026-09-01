@@ -145,6 +145,13 @@ async function getWalletProvider(): Promise<any> {
           requestChainId: async () => {
             return await sn.request({ type: 'wallet_requestChainId' });
           }
+        },
+        'starknet:walletApi': {
+          request: async (params: any) => {
+            console.log('[ZOR] starknet:walletApi.request:', params?.type, params?.params ? Object.keys(params.params) : '');
+            // Route all wallet API requests to the real wallet
+            return await sn.request(params);
+          }
         }
       }
     };
