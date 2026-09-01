@@ -62,8 +62,7 @@ function hasStrk20Support(account: any): boolean {
   return (
     account &&
     typeof account === "object" &&
-    typeof account.strk20InvokeTransaction === "function" &&
-    typeof account.strk20Balances === "function"
+    typeof account.strk20InvokeTransaction === "function"
   );
 }
 
