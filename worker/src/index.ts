@@ -651,6 +651,49 @@ function getInjectorScript(proxyOrigin: string): string {
       el = el.parentNode;
     }
   }, true); // useCapture = true to catch before page handlers
+
+  // === DYNAMIC ELEMENT INTERCEPTOR ===
+  // Catches dynamically created <script>, <link>, <img> elements
+  // (e.g., Next.js chunk loading via import() or dynamic script creation)
+  var observer = new MutationObserver(function(mutations) {
+    for (var m = 0; m < mutations.length; m++) {
+      var nodes = mutations[m].addedNodes;
+      for (var n = 0; n < nodes.length; n++) {
+        var node = nodes[n];
+        if (node.nodeType !== 1) continue; // skip non-element nodes
+        var el = node;
+        // Check script src
+        if (el.tagName === "SCRIPT") {
+          var src = el.getAttribute("src");
+          if (src && !src.startsWith(PROXY)) {
+            el.setAttribute("src", proxyUrl(src));
+          }
+        }
+        // Check link href
+        if (el.tagName === "LINK") {
+          var href = el.getAttribute("href");
+          if (href && !href.startsWith(PROXY)) {
+            el.setAttribute("href", proxyUrl(href));
+          }
+        }
+        // Check img src
+        if (el.tagName === "IMG") {
+          var src = el.getAttribute("src");
+          if (src && !src.startsWith(PROXY)) {
+            el.setAttribute("src", proxyUrl(src));
+          }
+        }
+        // Check iframe src
+        if (el.tagName === "IFRAME") {
+          var src = el.getAttribute("src");
+          if (src && !src.startsWith(PROXY)) {
+            el.setAttribute("src", proxyUrl(src));
+          }
+        }
+      }
+    }
+  });
+  observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
 })();
 </script>`;
 }

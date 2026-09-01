@@ -7,9 +7,11 @@ Basic Use Case:
 4. [User] The user is loggin with Ready!
 5. [User] then they can pay for time. The user select the tier. It's pay as you go, if the user not use all that they want, they obtain their money again. An wallet on worker is created exclusively to validate and handle the user payments.
 6. [MasterWorker] Create an managed 
-
-
----
+Workspace, task, ///
+Workspace, task, ///
+Workspace, task, ///
+Workspace, task, ///
+Workspace, task, ///---
 {"User":"Zor-UseCase",""}=""
 {"User":"Zor-UseCase",""}=""
 {"User":"Zor-UseCase",""}=""

@@ -57,12 +57,23 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
 
   /** Get the raw wallet extension (Ready/X) for STRK20 methods */
   function getRawWallet(): any {
-    // @ts-ignore
-    const sn = window?.starknet;
-    if (sn) return sn;
-    // @ts-ignore
-    const re = window?.starknetWallet;
-    if (re) return re;
+    // Try multiple selectors that wallets use
+    const selectors = [
+      () => (window as any)?.starknet,
+      () => (window as any)?.starknetWallet,
+      () => (window as any)?.wallets?.find((w: any) => w?.id?.includes('ready') || w?.id?.includes('argent')),
+      () => document.querySelector('[id*="starknet"]')?.closest('[data-wallet]') as any,
+    ];
+    for (const sel of selectors) {
+      try {
+        const w = sel();
+        if (w) {
+          console.log('[ZOR] Found raw wallet:', w.id || w.name || 'unknown', 'keys:', Object.keys(w).slice(0, 10));
+          return w;
+        }
+      } catch {}
+    }
+    console.warn('[ZOR] No raw wallet found. Available windows:', Object.keys(window).filter(k => k.toLowerCase().includes('stark') || k.toLowerCase().includes('wallet')));
     return null;
   }
 
@@ -70,11 +81,17 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   async function createStrk20Account(rawWallet: any, preferredAddress?: string): Promise<any> {
     const provider = new RpcProvider({ nodeUrl: SEPOLIA_RPC });
     try {
+      console.log('[ZOR] Attempting WalletAccountV6.connect...');
       const account = await WalletAccountV6.connect(provider, rawWallet);
-      console.log('WalletAccountV6 created, has strk20InvokeTransaction:', typeof account.strk20InvokeTransaction);
+      console.log('[ZOR] WalletAccountV6 created:', {
+        address: account?.address,
+        hasStrk20Invoke: typeof account?.strk20InvokeTransaction,
+        hasStrk20Balances: typeof account?.strk20Balances,
+        methods: Object.getOwnPropertyNames(Object.getPrototypeOf(account)).filter(m => m.includes('strk20') || m.includes('Strk20')),
+      });
       return account;
     } catch (e) {
-      console.warn('WalletAccountV6.connect failed:', e);
+      console.warn('[ZOR] WalletAccountV6.connect failed:', e);
       return null;
     }
   }
@@ -163,12 +180,16 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       const rawWallet = getRawWallet();
       let account: any = null;
 
+      console.log('[ZOR] Raw wallet available:', !!rawWallet);
+
       if (rawWallet) {
         account = await createStrk20Account(rawWallet, addr);
+        console.log('[ZOR] STRK20 account from WalletAccountV6:', !!account, 'has strk20Invoke:', typeof account?.strk20InvokeTransaction);
       }
 
       // Fallback: use starknetkit account
       if (!account) {
+        console.log('[ZOR] Falling back to starknetkit account (no STRK20)');
         if (connector && typeof connector.account === "function") {
           try {
             account = await connector.account({ nodeUrl: SEPOLIA_RPC });
@@ -179,6 +200,12 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       if (!account) {
         throw new Error("Could not read account from wallet. Make sure it is unlocked.");
       }
+
+      console.log('[ZOR] Final account:', {
+        address: account.address || account.selectedAddress,
+        hasStrk20Invoke: typeof account.strk20InvokeTransaction,
+        type: account.constructor?.name,
+      });
 
       initAccount(account, addr, connectorData?.chainId);
     } catch (e: unknown) {
