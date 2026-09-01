@@ -1,44 +1,14 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { connect, disconnect } from "starknetkit";
+import { WalletAccountV6, RpcProvider } from "starknet";
 
 const SN_SEPOLIA_CHAIN_ID = BigInt("0x534e5f5345504f4c4941");
 const STORAGE_KEY_ADDRESS = "zor_wallet_address";
+const SEPOLIA_RPC = "https://starknet-sepolia.public.blastapi.io/rpc/v0_7";
 
 interface WalletConnectProps {
   onAccountChange: (account: any) => void;
-}
-
-async function extractAccount(wallet: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  const walletAccount = wallet.account;
-  if (
-    walletAccount &&
-    typeof walletAccount === "object" &&
-    typeof (walletAccount as any).execute === "function"
-  ) {
-    return walletAccount as Record<string, unknown>;
-  }
-
-  const getSelected = wallet.getSelectedAccount;
-  if (typeof getSelected === "function") {
-    try {
-      const selected = await (getSelected as () => Promise<any>).call(wallet);
-      if (selected && typeof selected.execute === "function") {
-        return selected;
-      }
-    } catch {}
-  }
-
-  const accountObject = wallet.accountObject;
-  if (
-    accountObject &&
-    typeof accountObject === "object" &&
-    typeof (accountObject as any).execute === "function"
-  ) {
-    return accountObject as Record<string, unknown>;
-  }
-
-  return null;
 }
 
 function extractAddress(
@@ -85,6 +55,30 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     setStrk20Ready(hasStrk20Support(account));
   }, [onAccountChange, checkNetwork]);
 
+  /** Get the raw wallet extension (Ready/X) for STRK20 methods */
+  function getRawWallet(): any {
+    // @ts-ignore
+    const sn = window?.starknet;
+    if (sn) return sn;
+    // @ts-ignore
+    const re = window?.starknetWallet;
+    if (re) return re;
+    return null;
+  }
+
+  /** Create WalletAccountV6 with STRK20 support from raw wallet */
+  async function createStrk20Account(rawWallet: any, preferredAddress?: string): Promise<any> {
+    const provider = new RpcProvider({ nodeUrl: SEPOLIA_RPC });
+    try {
+      const account = await WalletAccountV6.connect(provider, rawWallet);
+      console.log('WalletAccountV6 created, has strk20InvokeTransaction:', typeof account.strk20InvokeTransaction);
+      return account;
+    } catch (e) {
+      console.warn('WalletAccountV6.connect failed:', e);
+      return null;
+    }
+  }
+
   useEffect(() => {
     const savedAddress = localStorage.getItem(STORAGE_KEY_ADDRESS);
     if (!savedAddress) return;
@@ -101,23 +95,34 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
           return;
         }
 
-        let account: any = null;
-        if (connector && typeof connector.account === "function") {
-          try {
-            account = await connector.account({ nodeUrl: "https://starknet-sepolia.public.blastapi.io/rpc/v0_7" });
-          } catch {}
-        }
-        if (!account && wallet) {
-          account = await extractAccount(wallet as unknown as Record<string, unknown>);
-        }
-
         const addr = connectorData?.account || extractAddress(
           (wallet || {}) as unknown as Record<string, unknown>,
-          account as Record<string, unknown> | null
+          null
         );
 
-        if (addr && addr.toLowerCase() === savedAddress.toLowerCase() && account) {
-          initAccount(account, addr, connectorData?.chainId);
+        if (addr && addr.toLowerCase() === savedAddress.toLowerCase()) {
+          // Try to create WalletAccountV6 with STRK20 support
+          const rawWallet = getRawWallet();
+          if (rawWallet) {
+            const strk20Account = await createStrk20Account(rawWallet, addr);
+            if (strk20Account) {
+              initAccount(strk20Account, addr, connectorData?.chainId);
+              return;
+            }
+          }
+
+          // Fallback: use starknetkit account (no STRK20)
+          let account: any = null;
+          if (connector && typeof connector.account === "function") {
+            try {
+              account = await connector.account({ nodeUrl: SEPOLIA_RPC });
+            } catch {}
+          }
+          if (account) {
+            initAccount(account, addr, connectorData?.chainId);
+          } else {
+            localStorage.removeItem(STORAGE_KEY_ADDRESS);
+          }
         } else {
           localStorage.removeItem(STORAGE_KEY_ADDRESS);
         }
@@ -146,26 +151,33 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         throw new Error("No wallet returned. Is a Starknet wallet installed?");
       }
 
-      let account: any = null;
-      if (connector && typeof connector.account === "function") {
-        try {
-          account = await connector.account({ nodeUrl: "https://starknet-sepolia.public.blastapi.io/rpc/v0_7" });
-        } catch {}
+      const addr = connectorData?.account || extractAddress(
+        (wallet || {}) as unknown as Record<string, unknown>,
+        null
+      );
+      if (!addr) {
+        throw new Error("Could not determine wallet address.");
       }
-      if (!account && wallet) {
-        account = await extractAccount(wallet as unknown as Record<string, unknown>);
+
+      // Try to create WalletAccountV6 with STRK20 support
+      const rawWallet = getRawWallet();
+      let account: any = null;
+
+      if (rawWallet) {
+        account = await createStrk20Account(rawWallet, addr);
+      }
+
+      // Fallback: use starknetkit account
+      if (!account) {
+        if (connector && typeof connector.account === "function") {
+          try {
+            account = await connector.account({ nodeUrl: SEPOLIA_RPC });
+          } catch {}
+        }
       }
 
       if (!account) {
         throw new Error("Could not read account from wallet. Make sure it is unlocked.");
-      }
-
-      const addr = connectorData?.account || extractAddress(
-        (wallet || {}) as unknown as Record<string, unknown>,
-        account as Record<string, unknown>
-      );
-      if (!addr) {
-        throw new Error("Could not determine wallet address.");
       }
 
       initAccount(account, addr, connectorData?.chainId);
