@@ -10,7 +10,6 @@ import {
 } from "@scure/starknet";
 import {
   hash,
-  shortString,
 } from "starknet";
 
 // ============ Helpers ============
@@ -90,24 +89,27 @@ async function buildDeployTx(params: {
 
   const calldata = [classHashBigInt, salt, pubKey];
 
+  const paddedAddress = padHex(bigIntToHex(accountAddress), 32);
+  const paddedSalt = padHex(bigIntToHex(salt), 32);
+  const paddedConstructorCalldata = calldata.map(v => padHex(bigIntToHex(v), 32));
+
   // Compute tx hash using starknet.js v3 hash computation
-  const compiledConstructorCalldata = calldata.map(v => bigIntToHex(v));
   const txHash = hash.calculateDeployAccountTransactionHash({
-    contractAddress: bigIntToHex(accountAddress),
+    contractAddress: paddedAddress,
     classHash,
-    compiledConstructorCalldata,
-    salt: bigIntToHex(salt),
-    version: shortString.encodeShortString("0x3"),
+    compiledConstructorCalldata: paddedConstructorCalldata,
+    salt: paddedSalt,
+    version: "0x3",
     chainId,
     nonce,
-    nonceDataAvailabilityMode: 0,
-    feeDataAvailabilityMode: 0,
+    nonceDataAvailabilityMode: 0n,
+    feeDataAvailabilityMode: 0n,
     resourceBounds: {
-      l1_gas: { max_amount: "0x0", max_price_per_unit: "0x0" },
-      l2_gas: { max_amount: "0x186a0", max_price_per_unit: "0x2386f26fc10000" },
-      l1_data_gas: { max_amount: "0x200", max_price_per_unit: "0x2386f26fc10000" },
+      l1_gas: { max_amount: BigInt("0x2000"), max_price_per_unit: BigInt("0x71afd498d0000") },
+      l2_gas: { max_amount: BigInt("0x120000"), max_price_per_unit: BigInt("0x174876e800") },
+      l1_data_gas: { max_amount: BigInt("0x800"), max_price_per_unit: BigInt("0xe8d4a51000") },
     },
-    tip: "0x0",
+    tip: 0n,
     paymasterData: [],
   });
 
@@ -121,13 +123,13 @@ async function buildDeployTx(params: {
       type: "DEPLOY_ACCOUNT",
       version: "0x3",
       signature: [r, s],
-      sender_address: padHex(bigIntToHex(accountAddress), 32),
-      calldata: calldata.map(v => padHex(bigIntToHex(v), 32)),
+      sender_address: paddedAddress,
+      calldata: paddedConstructorCalldata,
       nonce,
       resource_bounds: {
-        l1_gas: { max_amount: "0x0", max_price_per_unit: "0x0" },
-        l2_gas: { max_amount: "0x186a0", max_price_per_unit: "0x2386f26fc10000" },
-        l1_data_gas: { max_amount: "0x200", max_price_per_unit: "0x2386f26fc10000" },
+        l1_gas: { max_amount: "0x2000", max_price_per_unit: "0x71afd498d0000" },
+        l2_gas: { max_amount: "0x120000", max_price_per_unit: "0x174876e800" },
+        l1_data_gas: { max_amount: "0x800", max_price_per_unit: "0xe8d4a51000" },
       },
       tip: "0x0",
       paymaster_data: [],
@@ -135,7 +137,7 @@ async function buildDeployTx(params: {
       nonce_data_availability_mode: "L1",
       fee_data_availability_mode: "L1",
     },
-    accountAddress: padHex(bigIntToHex(accountAddress), 32),
+    accountAddress: paddedAddress,
   };
 }
 
@@ -151,24 +153,27 @@ async function buildInvokeTx(params: {
 }): Promise<{ tx: any }> {
   const { privKey, senderAddress, calldata, nonce, maxFee, chainId } = params;
 
+  const paddedSender = padHex(senderAddress, 32);
+  const paddedCalldata = calldata.map(v => padHex(v, 32));
+
   const resourceBounds = {
-    l1_gas: { max_amount: "0x0", max_price_per_unit: "0x0" },
-    l2_gas: { max_amount: "0x186a0", max_price_per_unit: "0x2386f26fc10000" },
-    l1_data_gas: { max_amount: "0x200", max_price_per_unit: "0x2386f26fc10000" },
+    l1_gas: { max_amount: BigInt("0x2000"), max_price_per_unit: BigInt("0x71afd498d0000") },
+    l2_gas: { max_amount: BigInt("0x120000"), max_price_per_unit: BigInt("0x174876e800") },
+    l1_data_gas: { max_amount: BigInt("0x800"), max_price_per_unit: BigInt("0xe8d4a51000") },
   };
 
   // Compute tx hash using starknet.js v3 hash computation
   const txHash = hash.calculateInvokeTransactionHash({
-    senderAddress,
-    version: shortString.encodeShortString("0x3"),
-    compiledCalldata: calldata,
+    senderAddress: paddedSender,
+    version: "0x3",
+    compiledCalldata: paddedCalldata,
     chainId,
     nonce,
     accountDeploymentData: [],
-    nonceDataAvailabilityMode: 0,
-    feeDataAvailabilityMode: 0,
+    nonceDataAvailabilityMode: 0n,
+    feeDataAvailabilityMode: 0n,
     resourceBounds,
-    tip: "0x0",
+    tip: 0n,
     paymasterData: [],
   });
 
@@ -181,13 +186,13 @@ async function buildInvokeTx(params: {
       type: "INVOKE",
       version: "0x3",
       signature: [r, s],
-      sender_address: senderAddress,
-      calldata: calldata.map(v => padHex(v, 32)),
+      sender_address: paddedSender,
+      calldata: paddedCalldata,
       nonce,
       resource_bounds: {
-        l1_gas: { max_amount: "0x0", max_price_per_unit: "0x0" },
-        l2_gas: { max_amount: "0x186a0", max_price_per_unit: "0x2386f26fc10000" },
-        l1_data_gas: { max_amount: "0x200", max_price_per_unit: "0x2386f26fc10000" },
+        l1_gas: { max_amount: "0x2000", max_price_per_unit: "0x71afd498d0000" },
+        l2_gas: { max_amount: "0x120000", max_price_per_unit: "0x174876e800" },
+        l1_data_gas: { max_amount: "0x800", max_price_per_unit: "0xe8d4a51000" },
       },
       tip: "0x0",
       paymaster_data: [],

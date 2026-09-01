@@ -9,7 +9,7 @@
 
 ---
 
-## Estado del Proyecto (2026-08-30)
+## Estado del Proyecto (2026-09-01)
 
 ### Lo que funciona
 - ✅ Worker proxy con stealth-fetch (raw TCP sockets)
@@ -39,7 +39,10 @@
 
 1. **✅ RESUELTO: Navegación inside iframe** — Click interceptor inyectado en el injector. Intercepta clicks en `<a href>` y `<form action>`, reescribe URLs a proxy, y navega el iframe a través del proxy. Server-side rewriting + click interceptor = cobertura completa.
 
-2. **✅ RESUELTO: STRK20 Privacy Pool para pagos** — Integrado via Starknet Wallet API. El wallet (Ready) maneja viewing keys, note discovery, ZK proofs, y submission. Worker verifica deposit events on-chain.
+2. **✅ SDK INTEGRATION: STRK20 Privacy Pool vault service (Opción B)** — El bloqueo anterior era `compile_actions` via `starknet_call` (rompe `NO_REPLAY_PROTECTION`). **RESUELTO** con el SDK oficial: `worker/vault/vault-service.ts` usa `createPrivateTransfers` + `CallMockProofProvider(validateSignature:false)` que produce un `CallAndProof` para `apply_actions` (NO compile_actions). Verificado contra Sepolia Alchemy: `register()` → 32-element calldata; `shield()` → 56-element calldata (register + channel + subchannel + deposit + encrypted note + surplus); ambos con class_hash `0x7e2bbd...` correcto y 9 proof_facts VIRTUAL_SNOS. **Settlement pendiente**: `apply_actions` en el pool real de Sepolia necesita pruebas VIRTUAL_SNOS genuinas (el pool valida proof_facts contra el blockifier). Para settlement se necesita: (a) prover real (starknet-privacy prover / AVNU), o (b) devnet local con pool compilado (requiere más RAM/CPU que el sandbox actual).
+   - Files: `worker/vault/vault-service.ts`, `worker/vault/run-sepolia.ts`
+   - SDK: `@starkware-libs/starknet-privacy-sdk@0.14.3-rc.6` (no npmjs, GitHub Packages only)
+   - `CallMockProofProvider` with `validateSignature:false` uses plain `compile_actions` VIEW → works on Alchemy without `simulateTransaction`
 
 3. **✅ RESUELTO: Per-user account deployment** — Worker deriva key única por usuario, calcula dirección OZ Account. Frontend usa starknet.js para deploy. Master account fondea la cuenta nueva via `/fund-account` endpoint.
 
@@ -72,13 +75,19 @@
 | 2026-08-30 | Balance-based billing (no session timer) | Más justo: el usuario paga por uso real, no por tiempo fijo |
 | 2026-08-30 | Master account para deploy de per-user wallets | Un solo deploy, múltiples cuentas derivadas |
 | 2026-08-30 | STRK20 Privacy Pool via Starknet Wallet API | Wallet maneja ZK proofs — sin proving service ni discovery service propio |
+| 2026-09-01 | Master-account V3 tx: resource bounds BigInt + padding consistente | Fix de "Invalid Tx version" / "Account validation failed" en /shield y /fund-account |
+| 2026-09-01 | Pool shield requiere prover oficial (Virtual SNOS) o devnet con mock prover | `compile_actions` NO es el entrypoint de liquidación; `apply_actions` + proof_facts lo es |
+| 2026-09-01 | Vault SDK integration (Option B) — official SDK path against live Sepolia | `CallMockProofProvider` with `validateSignature:false` works on Alchemy; produces correct `CallAndProof` for `apply_actions` |
 
 ---
 
 ## Próximos Pasos (para que el PO priorice)
 
-1. **FIX: Navegación inside iframe** — CRÍTICO. Sin esto, el proxy no sirve para navegar.
-2. **Per-user account deployment** — Implementar el flow completo.
+1. **STRK20 Pool shield server-side (ACTIVO)** — Decidir el approach del prover:
+   - (a) Integrar el SDK prover oficial de starknet-privacy (Virtual SNOS + proofs reales, `apply_actions`), o
+   - (b) Levantar un devnet local con mock prover para el flujo completo shield/unshield, o
+   - (c) Simplificar: desplegar un pool de prueba view-only donde `compile_actions` sea view pura (valida el flujo deposito/retiro end-to-end sin el proving completo).
+2. **Per-user account deployment** — Verificar flujo completo.
 3. **Top-up flow** — Permitir agregar más tiempo sin reiniciar sesión.
 4. **Rate limiting** — Básico: max X requests/min por token.
 5. **Testing end-to-end** — Probar el flow completo en el frontend.

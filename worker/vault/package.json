@@ -1,0 +1,21 @@
+{
+  "name": "vault",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@starkware-libs/starknet-privacy-sdk": "file:../../../../tmp/opencode/starknet-privacy/sdk",
+    "@types/node": "^26.4.0",
+    "starknet": "^10.7.1",
+    "starknet-devnet": "^0.8.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

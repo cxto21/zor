@@ -1,112 +1,112 @@
 /**
  * Viewing Key Management
- * 
+ *
  * Generates and manages viewing keys for the privacy pool.
- * Viewing keys are derived deterministically from the master private key.
+ * Uses grindKey from @scure/starknet for valid Stark field key derivation.
  */
 
-import { getPublicKey as scureGetPublicKey, sign as scureSign } from "@scure/starknet";
-import { hash, shortString } from "starknet";
+import {
+  getPublicKey as scureGetPublicKey,
+  sign as scureSign,
+  grindKey,
+} from "@scure/starknet";
+import { hash, shortString, ec } from "starknet";
 import type { ViewingKey } from "./types";
 
 // ============ Constants ============
 
-const VIEWING_KEY_DOMAIN = "zor-privacy-viewing-key-v1";
-// Field prime P = 2^251 + 17*2^192 + 1 — this is what @scure/starknet validates against
-const STARK_FIELD_PRIME = BigInt("0x800000000000011000000000000000000000000000000000000000000000001");
+// Privacy pool requires viewing keys in [1, CURVE_ORDER/2]
+const CURVE_ORDER = ec.starkCurve.CURVE.n;
+const MAX_VIEWING_KEY = CURVE_ORDER / 2n;
 
 // ============ Helpers ============
 
-function hexToBigInt(hex: string): bigint {
-  const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return h === "" ? 0n : BigInt("0x" + h);
-}
-
-function bigIntToHex(n: bigint): string {
-  return "0x" + n.toString(16);
-}
-
 function bytesToHex(bytes: Uint8Array): string {
   return "0x" + Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Strip 0x prefix and ensure lowercase hex for @scure/starknet */
+function stripHexPrefix(hex: string): string {
+  return hex.startsWith("0x") ? hex.slice(2) : hex;
 }
 
 // ============ Viewing Key Generation ============
 
 /**
  * Generate a deterministic viewing key from the master private key.
- * 
- * The viewing key is derived using HKDF-like construction:
- * viewing_key = H(master_key || domain || salt)
- * 
- * This ensures:
- * 1. Same master key always produces the same viewing key
- * 2. Different domains produce different viewing keys
- * 3. The viewing key is in the valid Stark field range
+ *
+ * Privacy pool requires viewing keys in [1, CURVE_ORDER/2].
+ * We use grindKey with rejection sampling until we get a valid key.
+ *
+ * Derivation: seed = SHA-256("zor-privacy-viewing-key-v1:" || masterKey)
+ *             viewingKey = grindKey(seed) if <= MAX_VIEWING_KEY, else re-derive
  */
 export async function generateViewingKey(masterPrivateKey: string): Promise<ViewingKey> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(`${VIEWING_KEY_DOMAIN}:${masterPrivateKey}`);
-  
-  // Use SHA-256 for key derivation
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = new Uint8Array(hashBuffer);
-  
-  // Convert to bigint and reduce to Stark field (Fp)
-  let privateKey = BigInt("0x" + Array.from(hashArray).map(b => b.toString(16).padStart(2, "0")).join(""));
-  privateKey = privateKey % STARK_FIELD_PRIME;
-  if (privateKey === 0n) privateKey = 1n; // Ensure non-zero
-  
-  // Derive public key (x-coordinate only) — @scure/starknet expects hex WITHOUT 0x prefix
-  const privKeyHexNoPrefix = bigIntToHex(privateKey).slice(2);
-  const pubKeyBytes = scureGetPublicKey(privKeyHexNoPrefix, false);
-  const pubKeyHex = bytesToHex(pubKeyBytes.slice(1, 33)); // Skip 0x04 prefix
-  
+  const masterHex = stripHexPrefix(masterPrivateKey);
+
+  // Deterministic seed: SHA-256(domain || masterKey)
+  const seedInput = new TextEncoder().encode(`zor-privacy-viewing-key-v1:${masterHex}`);
+  const seedHashBuffer = await crypto.subtle.digest("SHA-256", seedInput);
+  const seedHash = new Uint8Array(seedHashBuffer);
+  const seedHex = bytesToHex(seedHash);
+
+  // Rejection sampling: generate keys until we get one in [1, MAX_VIEWING_KEY]
+  let attempt = 0;
+  let viewingKeyHex: string;
+  let viewingKeyBigInt: bigint;
+
+  do {
+    const attemptSeed = stripHexPrefix(seedHex) + attempt.toString(16).padStart(2, "0");
+    viewingKeyHex = grindKey(attemptSeed);
+    viewingKeyBigInt = BigInt("0x" + viewingKeyHex);
+    attempt++;
+  } while (viewingKeyBigInt > MAX_VIEWING_KEY || viewingKeyBigInt === 0n);
+
+  // Derive public key
+  const pubKeyBytes = scureGetPublicKey(viewingKeyHex, true);
+  const pubKeyX = bytesToHex(pubKeyBytes.slice(1, 33));
+
   return {
-    privateKey: bigIntToHex(privateKey),
-    publicKey: pubKeyHex,
+    privateKey: "0x" + viewingKeyHex,
+    publicKey: pubKeyX,
   };
 }
 
 /**
  * Derive viewing key from master private key (sync version).
- * Uses a pre-computed approach for performance.
+ * Uses the same rejection sampling to ensure key is in [1, MAX_VIEWING_KEY].
  */
 export function deriveViewingKeySync(masterPrivateKey: string): ViewingKey {
-  // For sync operation, we use a simpler derivation
-  // The async version is preferred for production
-  const privKey = hexToBigInt(masterPrivateKey);
-  
-  // Simple derivation: viewing_key = H(master_key) mod field_order
-  // This is not cryptographically ideal but works for our use case
-  const hashInput = bigIntToHex(privKey);
-  
-  // Use a simple hash function (FNV-1a-like)
-  let hash = 0xcbf29ce484222325n;
-  for (let i = 2; i < hashInput.length; i += 2) {
-    const byte = BigInt("0x" + hashInput.slice(i, i + 2));
-    hash = (hash ^ byte) * 0x100000001b3n;
-    hash = hash & ((1n << 64n) - 1n); // Keep within 64 bits
+  const masterHex = stripHexPrefix(masterPrivateKey);
+
+  // Deterministic seed via simple hash (FNV-1a like, 256-bit)
+  const seedStr = `zor-privacy-viewing-key-v1:${masterHex}`;
+  let h1 = 0xcbf29ce484222325n, h2 = 0x517cc1b727220a95n;
+  for (let i = 0; i < seedStr.length; i++) {
+    const c = BigInt(seedStr.charCodeAt(i));
+    h1 = ((h1 ^ c) * 0x100000001b3n) & ((1n << 64n) - 1n);
+    h2 = ((h2 ^ c) * 0x100000001b3n) & ((1n << 64n) - 1n);
   }
-  
-  // Extend to 256 bits by combining multiple rounds
-  let extendedHash = hash;
-  for (let i = 0; i < 4; i++) {
-    const roundHash = hash ^ (BigInt(i) * 0x9e3779b97f4a7c15n);
-    extendedHash = extendedHash ^ (roundHash << 64n);
-  }
-  
-  // Reduce to Stark field (Fp)
-  const viewingKey = (extendedHash % STARK_FIELD_PRIME);
-  if (viewingKey === 0n) return { privateKey: "0x1", publicKey: "" };
-  
-  // Derive public key — @scure/starknet expects hex WITHOUT 0x prefix
-  const privKeyHexNoPrefix = bigIntToHex(viewingKey).slice(2);
-  const pubKeyBytes = scureGetPublicKey(privKeyHexNoPrefix, false);
-  const pubKeyHex = bytesToHex(pubKeyBytes.slice(1, 33));
-  
+  const baseSeed = (h1 << 64n | h2).toString(16).padStart(32, "0");
+
+  // Rejection sampling: generate keys until we get one in [1, MAX_VIEWING_KEY]
+  let attempt = 0;
+  let viewingKeyHex: string;
+  let viewingKeyBigInt: bigint;
+
+  do {
+    const attemptSeed = baseSeed + attempt.toString(16).padStart(2, "0");
+    viewingKeyHex = grindKey(attemptSeed);
+    viewingKeyBigInt = BigInt("0x" + viewingKeyHex);
+    attempt++;
+  } while (viewingKeyBigInt > MAX_VIEWING_KEY || viewingKeyBigInt === 0n);
+
+  const pubKeyBytes = scureGetPublicKey(viewingKeyHex, true);
+  const pubKeyX = bytesToHex(pubKeyBytes.slice(1, 33));
+
   return {
-    privateKey: bigIntToHex(viewingKey),
-    publicKey: pubKeyHex,
+    privateKey: "0x" + viewingKeyHex,
+    publicKey: pubKeyX,
   };
 }
 
@@ -118,9 +118,8 @@ export async function signWithViewingKey(
   viewingKey: string,
   messageHash: string
 ): Promise<{ r: bigint; s: bigint }> {
-  // @scure/starknet expects key and message hash WITHOUT 0x prefix
-  const keyHex = viewingKey.startsWith("0x") ? viewingKey.slice(2) : viewingKey;
-  const msgHex = messageHash.startsWith("0x") ? messageHash.slice(2) : messageHash;
+  const keyHex = stripHexPrefix(viewingKey);
+  const msgHex = stripHexPrefix(messageHash);
   const sig = scureSign(msgHex, keyHex);
   return { r: sig.r, s: sig.s };
 }
@@ -134,4 +133,9 @@ export function computeViewingKeyHash(viewingKey: string): string {
     shortString.encodeShortString("viewing_key"),
     hexToBigInt(viewingKey),
   ]);
+}
+
+function hexToBigInt(hex: string): bigint {
+  const h = stripHexPrefix(hex);
+  return h === "" ? 0n : BigInt("0x" + h);
 }

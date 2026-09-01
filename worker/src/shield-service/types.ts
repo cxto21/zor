@@ -1,11 +1,9 @@
 /**
  * Shield Service Types
- * 
+ *
  * High-cohesion module for STRK20 privacy pool interactions.
  * Handles viewing key management, deposit (shield), and withdrawal (unshield).
  */
-
-import type { ContractAddress } from "starknet";
 
 // ============ Core Types ============
 
@@ -14,6 +12,8 @@ export interface ShieldConfig {
   poolAddress: string;
   /** STRK token contract address */
   strkTokenAddress: string;
+  /** Paymaster contract address for gas sponsorship */
+  paymasterAddress: string;
   /** RPC node URL */
   rpcUrl: string;
   /** Master account private key (hex with 0x) */

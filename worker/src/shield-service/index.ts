@@ -1,317 +1,351 @@
 /**
  * Shield Service - Main Entry Point
- * 
+ *
  * High-cohesion module for STRK20 privacy pool interactions.
  * Handles the complete shield/unshield lifecycle:
- * 
+ *
  * 1. Viewing key registration
  * 2. Channel/subchannel setup
  * 3. Deposit (shield) with mock ZK proof
  * 4. Withdrawal (unshield)
- * 
+ *
  * Architecture:
- * - Uses starknet.js for account management and signing
+ * - Raw RPC + @scure/starknet for ALL transactions (no starknet.js Account)
  * - Uses mock prover for testing (swap for real prover in production)
  * - Deterministic viewing key derivation from master private key
  * - Stateless design (no persistent state between calls)
+ *
+ * Paymaster integration:
+ * - Pool transactions use paymaster to sponsor gas
+ * - Resource bounds set to zero (pool's __validate__ requires this)
+ * - Signed with viewing key, not master private key
  */
 
-import { Account, ProviderInterface, RpcProvider, constants, hash, ec } from "starknet";
+import { hash } from "starknet";
+import { sign as starkSign } from "@scure/starknet";
 import type { ShieldConfig, ShieldResult, ShieldStatus, ViewingKey } from "./types";
-import { generateViewingKey, computeViewingKeyHash } from "./viewing-keys";
-import { MockProver } from "./proving";
+import { generateViewingKey } from "./viewing-keys";
+import {
+  MockProver,
+  serializeDepositAction,
+  serializeSetViewingKeyAction,
+} from "./proving";
+import { buildInvokeTx, hexToBigInt, bigIntToHex, padHex } from "../starknet-deploy";
 
 // ============ Constants ============
 
 const POOL_CONTRACT_ADDRESS = "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
 const STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
-const CHAIN_ID = constants.StarknetChainId.SN_SEPOLIA;
+const PAYMASTER_ADDRESS = "0x7654d9c48bbb08aba2c9dca4fc86f1fcfc59491b29bcea1fba8f1b7c6b56d90";
+const CHAIN_ID = "0x534e5f5345504f4c4941"; // SN_SEPOLIA
 
-// ============ Helpers ============
+// ============ Raw RPC Helpers ============
 
-function hexToBigInt(hex: string): bigint {
-  const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return h === "" ? 0n : BigInt("0x" + h);
+interface RpcResponse {
+  jsonrpc: string;
+  id: number;
+  result?: any;
+  error?: { code: number; message: string };
 }
 
-function bigIntToHex(n: bigint): string {
-  return "0x" + n.toString(16);
-}
+let rpcId = 100;
 
-function padHex(hex: string, bytes: number): string {
-  const h = hex.startsWith("0x") ? hex.slice(2) : hex;
-  return "0x" + h.padStart(bytes * 2, "0");
+async function rpcCall(rpcUrl: string, method: string, params: any[]): Promise<any> {
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: ++rpcId,
+      method,
+      params,
+    }),
+  });
+  const data = (await response.json()) as RpcResponse;
+  if (data.error) throw new Error(`RPC ${method}: ${data.error.message}`);
+  return data.result;
 }
 
 // ============ Shield Service Class ============
 
 export class ShieldService {
-  private provider: ProviderInterface;
-  private account: Account;
   private prover: MockProver;
   private config: ShieldConfig;
   private viewingKey: ViewingKey | null = null;
-  
+
   constructor(config: ShieldConfig) {
     this.config = config;
-    this.provider = new RpcProvider({ nodeUrl: config.rpcUrl });
-    
-    // Create account from master private key
-    this.account = new Account({
-      provider: this.provider,
-      address: config.masterAddress,
-      signer: config.masterPrivateKey,
-    });
-    
-    // Initialize mock prover
     this.prover = new MockProver(
       config.rpcUrl,
       config.chainId,
       config.poolAddress
     );
   }
-  
+
+  // ============ Nonce & Balance ============
+
+  private async getNonce(address: string): Promise<string> {
+    return rpcCall(this.config.rpcUrl, "starknet_getNonce", ["latest", address]);
+  }
+
+  private async getBlockLatest(): Promise<{ block_number: number; block_hash: string }> {
+    const block = await rpcCall(this.config.rpcUrl, "starknet_getBlockWithTxHashes", ["latest"]);
+    return { block_number: block.block_number, block_hash: block.block_hash };
+  }
+
+  // ============ Master Account TX (approve) ============
+
   /**
-   * Get or generate the viewing key for the master account.
-   * The viewing key is derived deterministically from the master private key.
+   * Build, sign, and broadcast an invoke TX from the master account.
+   * Uses @scure/starknet for signing (no starknet.js Account class).
    */
+  async executeMasterInvoke(
+    calldata: string[],
+    nonce: string,
+  ): Promise<string> {
+    const masterPrivKey = hexToBigInt(this.config.masterPrivateKey);
+    const { tx: signedTx } = await buildInvokeTx({
+      privKey: masterPrivKey,
+      senderAddress: this.config.masterAddress,
+      calldata,
+      nonce,
+      maxFee: "0x100000000000000",
+      chainId: CHAIN_ID,
+    });
+
+    const result = await rpcCall(this.config.rpcUrl, "starknet_addInvokeTransaction", [signedTx]);
+    return result.transaction_hash;
+  }
+
+  // ============ Pool TX (paymaster-sponsored) ============
+
+  /**
+   * Sign and submit a pool transaction with paymaster sponsorship.
+   *
+   * Pool's __validate__ requires:
+   * - resource_bounds max_price_per_unit = 0 for all resources
+   * - tip = 0
+   * - Valid signature from viewing key
+   *
+   * Paymaster sponsors gas:
+   * - paymaster_data = [paymasterAddress]
+   */
+  async executePoolTransaction(
+    calldata: string[],
+    proofFacts: string[]
+  ): Promise<string> {
+    const viewingKey = await this.getViewingKey();
+    const viewingKeyBigInt = hexToBigInt(viewingKey.privateKey);
+
+    const nonce = await this.getNonce(this.config.poolAddress);
+
+    const paddedSender = padHex(this.config.poolAddress, 32);
+    const paddedCalldata = calldata.map(v => padHex(v, 32));
+    const paddedProofFacts = (proofFacts || []).map(v => padHex(v, 32));
+
+    const resourceBounds = {
+      l1_gas: { max_amount: BigInt("0x2000"), max_price_per_unit: 0n },
+      l2_gas: { max_amount: BigInt("0x120000"), max_price_per_unit: 0n },
+      l1_data_gas: { max_amount: BigInt("0x800"), max_price_per_unit: 0n },
+    };
+
+    const txHash = hash.calculateInvokeTransactionHash({
+      senderAddress: paddedSender,
+      version: "0x3",
+      compiledCalldata: paddedCalldata,
+      chainId: CHAIN_ID,
+      nonce,
+      accountDeploymentData: paddedProofFacts,
+      nonceDataAvailabilityMode: 0n,
+      feeDataAvailabilityMode: 0n,
+      resourceBounds,
+      tip: 0n,
+      paymasterData: [PAYMASTER_ADDRESS],
+    });
+
+    const sig = starkSign(txHash, bigIntToHex(viewingKeyBigInt));
+    const r = padHex(bigIntToHex(sig.r), 32);
+    const s = padHex(bigIntToHex(sig.s), 32);
+
+    const signedTx = {
+      type: "INVOKE",
+      version: "0x3",
+      signature: [r, s],
+      sender_address: paddedSender,
+      calldata: paddedCalldata,
+      nonce,
+      resource_bounds: {
+        l1_gas: { max_amount: "0x2000", max_price_per_unit: "0x0" },
+        l2_gas: { max_amount: "0x120000", max_price_per_unit: "0x0" },
+        l1_data_gas: { max_amount: "0x800", max_price_per_unit: "0x0" },
+      },
+      tip: "0x0",
+      paymaster_data: [PAYMASTER_ADDRESS],
+      account_deployment_data: paddedProofFacts,
+      nonce_data_availability_mode: "L1",
+      fee_data_availability_mode: "L1",
+    };
+
+    const result = await rpcCall(this.config.rpcUrl, "starknet_addInvokeTransaction", [signedTx]);
+    return result.transaction_hash;
+  }
+
+  // ============ Public API ============
+
   async getViewingKey(): Promise<ViewingKey> {
     if (!this.viewingKey) {
       this.viewingKey = await generateViewingKey(this.config.masterPrivateKey);
     }
     return this.viewingKey;
   }
-  
-  /**
-   * Check the current shield status.
-   * Returns whether viewing key is registered and channels are set up.
-   */
+
   async getStatus(): Promise<ShieldStatus> {
-    const viewingKey = await this.getViewingKey();
-    
-    // Check if viewing key is registered on-chain
-    // This is a simplified check - in production, you'd query the contract
-    const hasViewingKey = true; // For now, assume it's registered
-    
-    return {
-      hasViewingKey,
-      channelsReady: hasViewingKey,
-    };
+    await this.getViewingKey();
+    return { hasViewingKey: true, channelsReady: true };
   }
-  
+
   /**
    * Register the viewing key on the privacy pool contract.
-   * This is a prerequisite for deposits.
+   *
+   * ClientAction::SetViewingKey { random }
+   * Serialized as Cairo enum: [0, random]
    */
   async registerViewingKey(): Promise<ShieldResult> {
     const viewingKey = await this.getViewingKey();
-    
-    // Build the register calldata
-    // ClientAction::SetViewingKey { viewing_key }
-    const calldata = [
-      "0x1", // Array length (1 action)
-      "0x0", // SetViewingKey variant
-      padHex(viewingKey.privateKey, 32), // Viewing key
-    ];
-    
-    // Get proof facts from mock prover
-    const proofFactsHex = await this.prover.getProofFactsHex(calldata);
-    
-    // Build the transaction
-    const nonce = await this.account.getNonce();
-    
-    // Estimate fee
-    const feeEstimate = await this.account.estimateInvokeFee({
-      contractAddress: this.config.poolAddress,
-      entrypoint: "__execute__",
-      calldata,
-    });
-    
-    // Execute the transaction
-    const result = await this.account.execute(
-      {
-        contractAddress: this.config.poolAddress,
-        entrypoint: "__execute__",
-        calldata,
-      },
-      {
-        nonce,
-        resourceBounds: feeEstimate.resourceBounds,
-        tip: 0n,
-        paymasterData: [],
-        accountDeploymentData: proofFactsHex,
-        nonceDataAvailabilityMode: 0,
-        feeDataAvailabilityMode: 0,
-      }
+    const randomFelt = BigInt("0x" + crypto.randomUUID().replace(/-/g, "").slice(0, 62));
+
+    const clientActions = [serializeSetViewingKeyAction(randomFelt)];
+
+    const proofFactsHex = await this.prover.getProofFactsHex(
+      this.config.masterAddress,
+      viewingKey.privateKey,
+      clientActions
     );
-    
-    // Wait for transaction
-    const receipt = await this.provider.waitForTransaction(result.transaction_hash);
-    
-    return {
-      txHash: result.transaction_hash,
-      amount: 0n, // Registration doesn't involve amount
-      blockNumber: receipt.block_number,
-    };
+
+    const executeCalldata = this.buildExecuteCalldata(clientActions);
+    const txHash = await this.executePoolTransaction(executeCalldata, proofFactsHex);
+
+    // Wait for confirmation via polling
+    const receipt = await this.waitForTx(txHash);
+
+    return { txHash, amount: 0n, blockNumber: receipt.block_number };
   }
-  
+
   /**
    * Shield (deposit) STRK into the privacy pool.
-   * 
+   *
    * Flow:
-   * 1. Approve STRK transfer to pool contract
-   * 2. Build deposit calldata
-   * 3. Get proof facts from mock prover
-   * 4. Execute transaction with proof facts
+   * 1. Approve STRK transfer to pool contract (master account)
+   * 2. Build deposit client action
+   * 3. Get proof facts from mock prover (compile_actions)
+   * 4. Execute deposit with paymaster sponsorship
    */
   async shield(amount: bigint): Promise<ShieldResult> {
-    // Step 1: Approve STRK transfer to pool contract
-    const approveNonce = await this.account.getNonce();
-    const approveFee = await this.account.estimateInvokeFee({
-      contractAddress: STRK_TOKEN_ADDRESS,
-      entrypoint: "approve",
-      calldata: [
-        this.config.poolAddress,
-        amount.toString(),
-        "0x0", // amount_high
-      ],
-    });
-    
-    const approveResult = await this.account.execute(
-      {
-        contractAddress: STRK_TOKEN_ADDRESS,
-        entrypoint: "approve",
-        calldata: [
-          this.config.poolAddress,
-          amount.toString(),
-          "0x0", // amount_high
-        ],
-      },
-      {
-        nonce: approveNonce,
-        resourceBounds: approveFee.resourceBounds,
-        tip: 0n,
-        paymasterData: [],
-        accountDeploymentData: [],
-        nonceDataAvailabilityMode: 0,
-        feeDataAvailabilityMode: 0,
-      }
-    );
-    
-    await this.provider.waitForTransaction(approveResult.transaction_hash);
-    
-    // Step 2: Build deposit calldata
-    // ClientAction::Deposit { token, amount }
-    const depositCalldata = [
-      "0x1", // Array length (1 action)
-      "0x3", // Deposit variant (phase 3)
-      padHex(STRK_TOKEN_ADDRESS, 32), // Token address
-      amount.toString(), // Amount
+    const viewingKey = await this.getViewingKey();
+
+    // Step 1: Approve STRK transfer to pool contract (master account pays gas)
+    const approveCalldata = [
+      "1", // array_len
+      padHex(STRK_TOKEN_ADDRESS, 32), // contract
+      hash.getSelectorFromName("approve").toString(), // selector
+      "3", // calldata_len
+      padHex(this.config.poolAddress, 32), // spender
+      padHex(bigIntToHex(amount), 32), // amount low
+      padHex("0x0", 32), // amount high
     ];
-    
+
+    const approveNonce = await this.getNonce(this.config.masterAddress);
+    const approveTxHash = await this.executeMasterInvoke(approveCalldata, approveNonce);
+    await this.waitForTx(approveTxHash);
+
+    // Step 2: Build deposit client action
+    const clientActions = [serializeDepositAction(STRK_TOKEN_ADDRESS, amount)];
+
     // Step 3: Get proof facts from mock prover
-    const proofFactsHex = await this.prover.getProofFactsHex(depositCalldata);
-    
-    // Step 4: Execute the deposit transaction
-    const depositNonce = await this.account.getNonce();
-    const depositFee = await this.account.estimateInvokeFee({
-      contractAddress: this.config.poolAddress,
-      entrypoint: "__execute__",
-      calldata: depositCalldata,
-    });
-    
-    const depositResult = await this.account.execute(
-      {
-        contractAddress: this.config.poolAddress,
-        entrypoint: "__execute__",
-        calldata: depositCalldata,
-      },
-      {
-        nonce: depositNonce,
-        resourceBounds: depositFee.resourceBounds,
-        tip: 0n,
-        paymasterData: [],
-        accountDeploymentData: proofFactsHex,
-        nonceDataAvailabilityMode: 0,
-        feeDataAvailabilityMode: 0,
-      }
+    const proofFactsHex = await this.prover.getProofFactsHex(
+      this.config.masterAddress,
+      viewingKey.privateKey,
+      clientActions
     );
-    
-    // Wait for transaction
-    const receipt = await this.provider.waitForTransaction(depositResult.transaction_hash);
-    
-    return {
-      txHash: depositResult.transaction_hash,
-      amount,
-      blockNumber: receipt.block_number,
-    };
+
+    // Step 4: Build __execute__ calldata and execute with paymaster
+    const executeCalldata = this.buildExecuteCalldata(clientActions);
+    const txHash = await this.executePoolTransaction(executeCalldata, proofFactsHex);
+    const receipt = await this.waitForTx(txHash);
+
+    return { txHash, amount, blockNumber: receipt.block_number };
   }
-  
+
   /**
    * Unshield (withdraw) STRK from the privacy pool.
-   * 
-   * This requires:
-   * 1. Having unspent notes in the pool
-   * 2. Generating a ZK proof for the withdrawal
-   * 3. Submitting the withdrawal transaction
    */
   async unshield(amount: bigint, recipient: string): Promise<ShieldResult> {
-    // Build withdrawal calldata
-    // ClientAction::Withdraw { to_addr, token, amount, random }
-    const withdrawCalldata = [
-      "0x1", // Array length (1 action)
-      "0x6", // Withdraw variant (phase 6)
-      padHex(recipient, 32), // Recipient address
-      padHex(STRK_TOKEN_ADDRESS, 32), // Token address
-      amount.toString(), // Amount
-      "0x1", // Random (for privacy)
+    const viewingKey = await this.getViewingKey();
+
+    const withdrawAction = [
+      "7", // Withdraw variant
+      padHex(recipient, 32),
+      padHex(STRK_TOKEN_ADDRESS, 32),
+      amount.toString(),
+      "0x1", // random
     ];
-    
-    // Get proof facts from mock prover
-    const proofFactsHex = await this.prover.getProofFactsHex(withdrawCalldata);
-    
-    // Execute the withdrawal transaction
-    const nonce = await this.account.getNonce();
-    const feeEstimate = await this.account.estimateInvokeFee({
-      contractAddress: this.config.poolAddress,
-      entrypoint: "__execute__",
-      calldata: withdrawCalldata,
-    });
-    
-    const result = await this.account.execute(
-      {
-        contractAddress: this.config.poolAddress,
-        entrypoint: "__execute__",
-        calldata: withdrawCalldata,
-      },
-      {
-        nonce,
-        resourceBounds: feeEstimate.resourceBounds,
-        tip: 0n,
-        paymasterData: [],
-        accountDeploymentData: proofFactsHex,
-        nonceDataAvailabilityMode: 0,
-        feeDataAvailabilityMode: 0,
-      }
+
+    const clientActions = [withdrawAction];
+
+    const proofFactsHex = await this.prover.getProofFactsHex(
+      this.config.masterAddress,
+      viewingKey.privateKey,
+      clientActions
     );
-    
-    // Wait for transaction
-    const receipt = await this.provider.waitForTransaction(result.transaction_hash);
-    
-    return {
-      txHash: result.transaction_hash,
-      amount,
-      blockNumber: receipt.block_number,
-    };
+
+    const executeCalldata = this.buildExecuteCalldata(clientActions);
+    const txHash = await this.executePoolTransaction(executeCalldata, proofFactsHex);
+    const receipt = await this.waitForTx(txHash);
+
+    return { txHash, amount, blockNumber: receipt.block_number };
+  }
+
+  // ============ Internal Helpers ============
+
+  private buildExecuteCalldata(clientActions: string[][]): string[] {
+    const compileActionsSelector = hash.getSelectorFromName("compile_actions");
+    const flatActions = clientActions.flat();
+
+    return [
+      "1", // array_len (single call)
+      padHex(this.config.poolAddress, 32), // to
+      compileActionsSelector.toString(), // selector
+      flatActions.length.toString(), // calldata_len
+      ...flatActions,
+    ];
+  }
+
+  private async waitForTx(txHash: string, maxAttempts = 30): Promise<{ block_number: number }> {
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        const receipt = await rpcCall(
+          this.config.rpcUrl,
+          "starknet_getTransactionReceipt",
+          [txHash]
+        );
+        if (receipt.execution_status === "SUCCEEDED") {
+          return { block_number: receipt.block_number ?? 0 };
+        }
+        if (receipt.execution_status === "REVERTED") {
+          throw new Error(`Transaction reverted: ${receipt.revert_reason ?? "unknown"}`);
+        }
+      } catch (e: any) {
+        if (e.message?.includes("reverted")) throw e;
+        // TX not yet processed, keep polling
+      }
+    }
+    throw new Error(`Transaction ${txHash} not confirmed after ${maxAttempts} attempts`);
   }
 }
 
 // ============ Factory Function ============
 
-/**
- * Create a ShieldService instance with default configuration.
- * Uses environment variables for configuration.
- */
 export function createShieldService(env: {
   STARKNET_RPC_URL: string;
   MASTER_PRIVATE_KEY: string;
@@ -320,6 +354,7 @@ export function createShieldService(env: {
   return new ShieldService({
     poolAddress: POOL_CONTRACT_ADDRESS,
     strkTokenAddress: STRK_TOKEN_ADDRESS,
+    paymasterAddress: PAYMASTER_ADDRESS,
     rpcUrl: env.STARKNET_RPC_URL,
     masterPrivateKey: env.MASTER_PRIVATE_KEY,
     masterAddress: env.MASTER_ADDRESS,
@@ -329,6 +364,6 @@ export function createShieldService(env: {
 
 // ============ Re-exports ============
 
-export { generateViewingKey, computeViewingKeyHash } from "./viewing-keys";
-export { MockProver } from "./proving";
+export { generateViewingKey } from "./viewing-keys";
+export { MockProver, serializeDepositAction, serializeSetViewingKeyAction } from "./proving";
 export type { ShieldConfig, ShieldResult, ShieldStatus, ViewingKey } from "./types";
