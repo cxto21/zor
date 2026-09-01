@@ -92,7 +92,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       } catch {}
     }
 
-    // Also check window.starknet in detail
+    // Also check window.starknet in detail (NOT enumerable, so Object.keys misses it)
     const sn = (window as any)?.starknet;
     if (sn) {
       console.log('[ZOR] window.starknet detail:', {
@@ -106,18 +106,11 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         accountProto: sn?.account ? Object.getOwnPropertyNames(Object.getPrototypeOf(sn.account)).slice(0, 20) : [],
       });
 
-      // Check if starknet.account is the real wallet
-      if (sn.account && typeof sn.account === 'object' && typeof sn.account.request === 'function') {
-        console.log('[ZOR] window.starknet.account has request() — might be the real wallet');
-        candidates.push(['starknet.account', sn.account]);
-      }
-
-      // Check starknet._wallet or similar internal properties
-      for (const internalKey of ['_wallet', 'wallet', '_provider', 'provider', '_connector', 'connector']) {
-        if (sn[internalKey] && typeof sn[internalKey] === 'object' && typeof sn[internalKey].request === 'function') {
-          console.log(`[ZOR] window.starknet.${internalKey} has request() — might be real wallet`);
-          candidates.push([`starknet.${internalKey}`, sn[internalKey]]);
-        }
+      // window.starknet IS the raw wallet — it has request() and enable()
+      // The issue is it's set via Object.defineProperty so Object.keys() misses it
+      if (typeof sn.request === 'function') {
+        console.log('[ZOR] window.starknet has request() — adding as candidate');
+        candidates.push(['starknet', sn]);
       }
     }
 
