@@ -47,15 +47,15 @@ Klome="asdf" - [[00],023
 @AgentTemplateMarketing
 @AgentTemplateMarketing
 @AgentTemplateMarketing
-@AgentTemplateProduct
-@AgentTemplateProduct
-@AgentTemplateProduct
-@AgentTemplateProduct
+@AgentTemplateProductManager
+@AgentTemplateProductManager
+@AgentTemplateProductManager
+@AgentTemplateProductManager
 
-
-
-
-
+@AgentTemplateDeveloperBlockchainSpecialist
+@AgentTemplateDeveloperBlockchainSpecialistStarknet
+@AgentTemplateDeveloper
+@AgentTemplateDeveloper
 
 
 

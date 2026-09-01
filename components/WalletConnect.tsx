@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { connect, disconnect } from "starknetkit";
 import { WalletAccountV6, RpcProvider } from "starknet";
+import { createStore } from "@starknet-io/get-starknet-discovery";
 
 const SN_SEPOLIA_CHAIN_ID = BigInt("0x534e5f5345504f4c4941");
 const STORAGE_KEY_ADDRESS = "zor_wallet_address";
@@ -27,7 +28,6 @@ function extractAddress(
   return null;
 }
 
-/** Check if the account supports STRK20 wallet API methods */
 function hasStrk20Support(account: any): boolean {
   return (
     account &&
@@ -37,117 +37,65 @@ function hasStrk20Support(account: any): boolean {
 }
 
 /**
- * Discover wallet providers via EIP-6963.
- * Returns a provider with features["standard:connect"] that WalletAccountV6 needs.
+ * Discover wallets via @starknet-io/get-starknet-discovery.
+ * This scans window for injected wallets (Ready, Argent X, etc.)
+ * and returns WalletWithStarknetFeatures objects with features["starknet:walletApi"].
  */
-async function discoverEip6963Wallets(): Promise<any[]> {
+async function discoverWallets(): Promise<any[]> {
   return new Promise((resolve) => {
+    const store = createStore({
+      // Don't use EIP-1193 adapters (prevents MetaMask popups)
+      eip1193Adapters: []
+    });
+
     const wallets: any[] = [];
-    const handler = (event: any) => {
-      const info = event?.detail?.info;
-      const provider = event?.detail?.provider;
-      if (provider && typeof provider === 'object') {
-        console.log('[ZOR] EIP-6963 wallet discovered:', info?.name, 'has features:', !!provider.features, 'features keys:', provider.features ? Object.keys(provider.features) : []);
-        wallets.push({ info, provider });
+
+    // Subscribe to wallet changes
+    const unsubscribe = store.subscribe((newWallets: any[]) => {
+      console.log('[ZOR] Discovery: wallets changed:', newWallets.length, 'wallets');
+      for (const w of newWallets) {
+        const hasFeatures = !!w.features;
+        const hasStrk20Api = !!w.features?.['starknet:walletApi'];
+        const hasStandardConnect = !!w.features?.['standard:connect'];
+        console.log('[ZOR] Discovery: wallet:', w.name, {
+          hasFeatures,
+          hasStrk20Api,
+          hasStandardConnect,
+          features: w.features ? Object.keys(w.features) : []
+        });
+        if (!wallets.find((x: any) => x.name === w.name)) {
+          wallets.push(w);
+        }
       }
-    };
+    });
 
-    window.addEventListener('eip6963:announceProvider', handler);
-    // Trigger discovery
-    window.dispatchEvent(new CustomEvent('eip6963:requestProvider'));
+    // Also check already-discovered wallets
+    const existing = store.getWallets();
+    console.log('[ZOR] Discovery: existing wallets:', existing.length);
+    for (const w of existing) {
+      console.log('[ZOR] Discovery: existing wallet:', w.name, {
+        hasFeatures: !!w.features,
+        features: w.features ? Object.keys(w.features) : []
+      });
+      if (!wallets.find((x: any) => x.name === w.name)) {
+        wallets.push(w);
+      }
+    }
 
-    // Wait a bit for wallets to announce themselves
+    // Give the discovery mechanisms time to find injected wallets
+    // Try refreshing injected wallets
+    try {
+      (store as any)._refreshInjectedWallets?.();
+    } catch {}
+
+    // Wait for wallets to be discovered
     setTimeout(() => {
-      window.removeEventListener('eip6963:announceProvider', handler);
-      console.log('[ZOR] EIP-6963 discovery complete, found', wallets.length, 'wallets');
+      unsubscribe();
+      console.log('[ZOR] Discovery complete, found', wallets.length, 'wallets');
       resolve(wallets);
-    }, 500);
+    }, 1000);
   });
 }
-
-  /** Get the raw wallet extension with features["starknet:walletApi"] for STRK20 */
-  async function getWalletProvider(): Promise<any> {
-    // Method 1: EIP-6963 discovery
-    console.log('[ZOR] Trying EIP-6963 wallet discovery...');
-    const eip6963Wallets = await discoverEip6963Wallets();
-    for (const w of eip6963Wallets) {
-      if (w.provider?.features?.['standard:connect']) {
-        console.log('[ZOR] Found EIP-6963 wallet:', w.info?.name, 'has starknet:walletApi:', !!w.provider?.features?.['starknet:walletApi']);
-        return w.provider;
-      }
-    }
-
-    // Method 2: Check window.starknet.features
-    const sn = (window as any)?.starknet;
-    if (sn?.features?.['starknet:walletApi']) {
-      console.log('[ZOR] window.starknet has native starknet:walletApi feature');
-      return sn;
-    }
-
-    // Method 3: Check if wallet name indicates Ready (STRK20-capable)
-    const walletName = sn?.name || sn?.id || 'unknown';
-    console.log('[ZOR] Connected wallet name:', walletName);
-
-    if (!walletName.toLowerCase().includes('ready') && !walletName.toLowerCase().includes('xverse')) {
-      console.warn('[ZOR] ⚠️ Wallet "' + walletName + '" may NOT support STRK20. Required: Ready or Xverse wallet.');
-    }
-
-    // Method 4: Wrap window.starknet with synthetic features
-    if (sn && typeof sn.request === 'function') {
-      console.log('[ZOR] Creating wrapper for wallet:', walletName);
-      const wrapper = {
-        ...sn,
-        on: sn.on || (() => () => {}),
-        off: sn.off || (() => () => {}),
-        features: {
-          'standard:connect': {
-            connect: async (opts: any) => {
-              console.log('[ZOR] standard:connect called');
-              const accounts = await sn.request({ type: 'wallet_requestAccounts', params: { silent: opts?.silent } });
-              return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
-            }
-          },
-          'standard:events': {
-            on: () => () => {}
-          },
-          'starknet:walletApi': {
-            request: async (params: any) => {
-              console.log('[ZOR] starknet:walletApi.request:', params?.type);
-              try {
-                const result = await sn.request(params);
-                console.log('[ZOR] starknet:walletApi.request OK:', params?.type);
-                return result;
-              } catch (e: any) {
-                console.error('[ZOR] starknet:walletApi.request FAILED:', e?.message || e);
-                throw e;
-              }
-            }
-          },
-          'wallet_getPermissions': {
-            getPermissions: async () => await sn.request({ type: 'wallet_getPermissions' })
-          },
-          'wallet_requestAccounts': {
-            requestAccounts: async (opts: any) => await sn.request({ type: 'wallet_requestAccounts', params: opts })
-          },
-          'wallet_addInvokeTransaction': {
-            addInvokeTransaction: async (params: any) => await sn.request({ type: 'wallet_addInvokeTransaction', params })
-          },
-          'wallet_signMessage': {
-            signMessage: async (params: any) => await sn.request({ type: 'wallet_signMessage', params })
-          },
-          'wallet_switchStarknetChain': {
-            switchStarknetChain: async (params: any) => await sn.request({ type: 'wallet_switchStarknetChain', params })
-          },
-          'wallet_requestChainId': {
-            requestChainId: async () => await sn.request({ type: 'wallet_requestChainId' })
-          }
-        }
-      };
-      return wrapper;
-    }
-
-    return null;
-  }
 
 const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [address, setAddress] = useState<string | null>(null);
@@ -168,12 +116,13 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     setStrk20Ready(hasStrk20Support(account));
   }, [onAccountChange, checkNetwork]);
 
-  /** Create WalletAccountV6 with STRK20 support from wallet provider */
+  /**
+   * Create WalletAccountV6 with STRK20 support using discovered wallet.
+   */
   async function createStrk20Account(walletProvider: any): Promise<any> {
     const provider = new RpcProvider({ nodeUrl: SEPOLIA_RPC });
     try {
-      console.log('[ZOR] Attempting WalletAccountV6.connect...');
-      console.log('[ZOR] Wallet provider features:', walletProvider?.features ? Object.keys(walletProvider.features) : 'none');
+      console.log('[ZOR] WalletAccountV6.connect with discovered wallet:', walletProvider.name);
       const account = await WalletAccountV6.connect(provider, walletProvider);
       console.log('[ZOR] WalletAccountV6 created!', {
         address: account?.address,
@@ -187,12 +136,90 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     }
   }
 
+  /**
+   * Try to find a wallet with STRK20 support:
+   * 1. Use get-starknet-discovery to find injected wallets
+   * 2. Fall back to starknetkit
+   */
+  async function findStrk20Wallet(): Promise<{ wallet: any; address: string; chainId?: bigint } | null> {
+    // Method 1: Discovery
+    console.log('[ZOR] Trying wallet discovery...');
+    const discoveredWallets = await discoverWallets();
+
+    // Find wallet with starknet:walletApi (STRK20-capable)
+    const strk20Wallet = discoveredWallets.find((w: any) =>
+      w.features?.['starknet:walletApi'] && w.features?.['standard:connect']
+    );
+    if (strk20Wallet) {
+      console.log('[ZOR] Found STRK20-capable wallet via discovery:', strk20Wallet.name);
+      // Get address from the wallet
+      try {
+        const addr = await strk20Wallet.features['wallet_requestAccounts']?.requestAccounts();
+        const address = Array.isArray(addr) ? addr[0] : (typeof addr === 'string' ? addr : null);
+        if (address) {
+          return { wallet: strk20Wallet, address, chainId: undefined };
+        }
+      } catch (e) {
+        console.warn('[ZOR] Could not get address from discovered wallet:', e);
+      }
+    }
+
+    // Find any wallet (even without STRK20) for fallback
+    const anyWallet = discoveredWallets[0];
+    if (anyWallet) {
+      console.log('[ZOR] Found wallet (no STRK20):', anyWallet.name, 'features:', anyWallet.features ? Object.keys(anyWallet.features) : 'none');
+    }
+
+    // Method 2: starknetkit fallback (gets us the address)
+    console.log('[ZOR] Using starknetkit for address...');
+    const result = await connect({ modalMode: "alwaysAsk", modalTheme: "light" });
+    const connector = result?.connector;
+    const wallet = result?.wallet;
+    const connectorData = result?.connectorData;
+
+    const addr = connectorData?.account || extractAddress(
+      (wallet || {}) as unknown as Record<string, unknown>,
+      null
+    );
+    if (!addr) return null;
+
+    // If we found a STRK20 wallet via discovery, use it
+    if (strk20Wallet) {
+      return { wallet: strk20Wallet, address: addr, chainId: connectorData?.chainId };
+    }
+
+    // Otherwise return the starknetkit wallet (no STRK20)
+    return { wallet: null, address: addr, chainId: connectorData?.chainId };
+  }
+
   useEffect(() => {
     const savedAddress = localStorage.getItem(STORAGE_KEY_ADDRESS);
     if (!savedAddress) return;
 
     (async () => {
       try {
+        // Try discovery first
+        const discoveredWallets = await discoverWallets();
+        const strk20Wallet = discoveredWallets.find((w: any) =>
+          w.features?.['starknet:walletApi'] && w.features?.['standard:connect']
+        );
+
+        if (strk20Wallet) {
+          // Try silent connect
+          try {
+            const accounts = await strk20Wallet.features['wallet_requestAccounts']?.requestAccounts({ silent: true });
+            const addr = Array.isArray(accounts) ? accounts[0] : (typeof accounts === 'string' ? accounts : null);
+            if (addr && addr.toLowerCase() === savedAddress.toLowerCase()) {
+              const strk20Account = await createStrk20Account(strk20Wallet);
+              if (strk20Account) {
+                initAccount(strk20Account, addr);
+                return;
+              }
+            }
+          } catch {}
+        }
+
+        // Fallback to starknetkit
         const result = await connect({ modalMode: "neverAsk" });
         const connector = result?.connector;
         const wallet = result?.wallet;
@@ -209,17 +236,16 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         );
 
         if (addr && addr.toLowerCase() === savedAddress.toLowerCase()) {
-          // Try EIP-6963 / features-based wallet for STRK20
-          const walletProvider = await getWalletProvider();
-          if (walletProvider) {
-            const strk20Account = await createStrk20Account(walletProvider);
+          // Try to create WalletAccountV6 with discovered wallet
+          if (strk20Wallet) {
+            const strk20Account = await createStrk20Account(strk20Wallet);
             if (strk20Account) {
               initAccount(strk20Account, addr, connectorData?.chainId);
               return;
             }
           }
 
-          // Fallback: use starknetkit account (no STRK20)
+          // Fallback: use starknetkit account
           let account: any = null;
           if (connector && typeof connector.account === "function") {
             try {
@@ -246,38 +272,25 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     setWrongNetwork(false);
 
     try {
-      const result = await connect({
-        modalMode: "alwaysAsk",
-        modalTheme: "light",
-      });
-
-      const connector = result?.connector;
-      const wallet = result?.wallet;
-      const connectorData = result?.connectorData;
-
-      if (!connector && !wallet) {
-        throw new Error("No wallet returned. Is a Starknet wallet installed?");
+      const walletInfo = await findStrk20Wallet();
+      if (!walletInfo) {
+        throw new Error("No wallet found. Is a Starknet wallet installed?");
       }
 
-      const addr = connectorData?.account || extractAddress(
-        (wallet || {}) as unknown as Record<string, unknown>,
-        null
-      );
-      if (!addr) {
-        throw new Error("Could not determine wallet address.");
-      }
+      const { wallet, address, chainId } = walletInfo;
 
-      // Try EIP-6963 / features-based wallet for STRK20
-      const walletProvider = await getWalletProvider();
       let account: any = null;
 
-      if (walletProvider) {
-        account = await createStrk20Account(walletProvider);
+      if (wallet) {
+        // Create WalletAccountV6 with STRK20 support
+        account = await createStrk20Account(wallet);
       }
 
-      // Fallback: use starknetkit account
       if (!account) {
+        // Fallback to starknetkit
         console.log('[ZOR] Falling back to starknetkit account (no STRK20)');
+        const result = await connect({ modalMode: "alwaysAsk", modalTheme: "light" });
+        const connector = result?.connector;
         if (connector && typeof connector.account === "function") {
           try {
             account = await connector.account({ nodeUrl: SEPOLIA_RPC });
@@ -289,12 +302,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         throw new Error("Could not read account from wallet. Make sure it is unlocked.");
       }
 
-      console.log('[ZOR] Final account:', {
-        address: account.address || account.selectedAddress,
-        hasStrk20Invoke: typeof account.strk20InvokeTransaction,
-      });
-
-      initAccount(account, addr, connectorData?.chainId);
+      initAccount(account, address, chainId);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (
