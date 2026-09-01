@@ -65,103 +65,89 @@ async function discoverEip6963Wallets(): Promise<any[]> {
   });
 }
 
-/** Get the raw wallet provider with features["standard:connect"] */
-async function getWalletProvider(): Promise<any> {
-  // Method 1: EIP-6963 discovery (returns providers with features)
-  console.log('[ZOR] Trying EIP-6963 wallet discovery...');
-  const eip6963Wallets = await discoverEip6963Wallets();
-
-  for (const w of eip6963Wallets) {
-    if (w.provider?.features?.['standard:connect']) {
-      console.log('[ZOR] Found EIP-6963 wallet with standard:connect:', w.info?.name);
-      return w.provider;
+  /** Get the raw wallet extension with features["starknet:walletApi"] for STRK20 */
+  async function getWalletProvider(): Promise<any> {
+    // Method 1: EIP-6963 discovery
+    console.log('[ZOR] Trying EIP-6963 wallet discovery...');
+    const eip6963Wallets = await discoverEip6963Wallets();
+    for (const w of eip6963Wallets) {
+      if (w.provider?.features?.['standard:connect']) {
+        console.log('[ZOR] Found EIP-6963 wallet:', w.info?.name, 'has starknet:walletApi:', !!w.provider?.features?.['starknet:walletApi']);
+        return w.provider;
+      }
     }
-  }
 
-  // Method 2: Check window.starknet.features (some wallets expose it directly)
-  const sn = (window as any)?.starknet;
-  if (sn?.features?.['standard:connect']) {
-    console.log('[ZOR] window.starknet has features["standard:connect"]');
-    return sn;
-  }
+    // Method 2: Check window.starknet.features
+    const sn = (window as any)?.starknet;
+    if (sn?.features?.['starknet:walletApi']) {
+      console.log('[ZOR] window.starknet has native starknet:walletApi feature');
+      return sn;
+    }
 
-  // Method 3: Try to wrap window.starknet's request() into a features interface
-  if (sn && typeof sn.request === 'function') {
-    console.log('[ZOR] Creating wrapper for window.starknet with features interface...');
-    // Build the full wrapper with all methods WalletAccountV6 needs
-    const wrapper = {
-      ...sn,
-      // Ensure on/off are present (WalletAccountV6 needs them for event listening)
-      on: sn.on || ((event: string, handler: Function) => {
-        console.log('[ZOR] wrapper.on called:', event);
-        return sn;
-      }),
-      off: sn.off || ((event: string, handler: Function) => {
-        console.log('[ZOR] wrapper.off called:', event);
-        return sn;
-      }),
-      features: {
-        'standard:connect': {
-          connect: async (opts: any) => {
-            console.log('[ZOR] standard:connect called via wrapper');
-            const accounts = await sn.request({ type: 'wallet_requestAccounts', params: { silent: opts?.silent } });
-            return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
-          }
-        },
-        'standard:events': {
-          on: (event: string, handler: Function) => {
-            console.log('[ZOR] standard:events.on called:', event);
-            // starknetkit doesn't support "change" events — silently ignore
-            // Return a no-op unsubscribe function
-            return () => {};
-          }
-        },
-        'wallet_getPermissions': {
-          getPermissions: async () => {
-            return await sn.request({ type: 'wallet_getPermissions' });
-          }
-        },
-        'wallet_requestAccounts': {
-          requestAccounts: async (opts: any) => {
-            return await sn.request({ type: 'wallet_requestAccounts', params: opts });
-          }
-        },
-        'wallet_addInvokeTransaction': {
-          addInvokeTransaction: async (params: any) => {
-            return await sn.request({ type: 'wallet_addInvokeTransaction', params });
-          }
-        },
-        'wallet_signMessage': {
-          signMessage: async (params: any) => {
-            return await sn.request({ type: 'wallet_signMessage', params });
-          }
-        },
-        'wallet_switchStarknetChain': {
-          switchStarknetChain: async (params: any) => {
-            return await sn.request({ type: 'wallet_switchStarknetChain', params });
-          }
-        },
-        'wallet_requestChainId': {
-          requestChainId: async () => {
-            return await sn.request({ type: 'wallet_requestChainId' });
-          }
-        },
-        'starknet:walletApi': {
-          request: async (params: any) => {
-            console.log('[ZOR] starknet:walletApi.request:', params?.type, params?.params ? Object.keys(params.params) : '');
-            // Route all wallet API requests to the real wallet
-            return await sn.request(params);
+    // Method 3: Check if wallet name indicates Ready (STRK20-capable)
+    const walletName = sn?.name || sn?.id || 'unknown';
+    console.log('[ZOR] Connected wallet name:', walletName);
+
+    if (!walletName.toLowerCase().includes('ready') && !walletName.toLowerCase().includes('xverse')) {
+      console.warn('[ZOR] ⚠️ Wallet "' + walletName + '" may NOT support STRK20. Required: Ready or Xverse wallet.');
+    }
+
+    // Method 4: Wrap window.starknet with synthetic features
+    if (sn && typeof sn.request === 'function') {
+      console.log('[ZOR] Creating wrapper for wallet:', walletName);
+      const wrapper = {
+        ...sn,
+        on: sn.on || (() => () => {}),
+        off: sn.off || (() => () => {}),
+        features: {
+          'standard:connect': {
+            connect: async (opts: any) => {
+              console.log('[ZOR] standard:connect called');
+              const accounts = await sn.request({ type: 'wallet_requestAccounts', params: { silent: opts?.silent } });
+              return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
+            }
+          },
+          'standard:events': {
+            on: () => () => {}
+          },
+          'starknet:walletApi': {
+            request: async (params: any) => {
+              console.log('[ZOR] starknet:walletApi.request:', params?.type);
+              try {
+                const result = await sn.request(params);
+                console.log('[ZOR] starknet:walletApi.request OK:', params?.type);
+                return result;
+              } catch (e: any) {
+                console.error('[ZOR] starknet:walletApi.request FAILED:', e?.message || e);
+                throw e;
+              }
+            }
+          },
+          'wallet_getPermissions': {
+            getPermissions: async () => await sn.request({ type: 'wallet_getPermissions' })
+          },
+          'wallet_requestAccounts': {
+            requestAccounts: async (opts: any) => await sn.request({ type: 'wallet_requestAccounts', params: opts })
+          },
+          'wallet_addInvokeTransaction': {
+            addInvokeTransaction: async (params: any) => await sn.request({ type: 'wallet_addInvokeTransaction', params })
+          },
+          'wallet_signMessage': {
+            signMessage: async (params: any) => await sn.request({ type: 'wallet_signMessage', params })
+          },
+          'wallet_switchStarknetChain': {
+            switchStarknetChain: async (params: any) => await sn.request({ type: 'wallet_switchStarknetChain', params })
+          },
+          'wallet_requestChainId': {
+            requestChainId: async () => await sn.request({ type: 'wallet_requestChainId' })
           }
         }
-      }
-    };
-    console.log('[ZOR] Wrapper created, features keys:', Object.keys(wrapper.features), 'has on:', typeof wrapper.on, 'has off:', typeof wrapper.off);
-    return wrapper;
-  }
+      };
+      return wrapper;
+    }
 
-  console.warn('[ZOR] No wallet provider with standard:connect found');
-  return null;
-}
+    return null;
+  }
 
 const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [address, setAddress] = useState<string | null>(null);
