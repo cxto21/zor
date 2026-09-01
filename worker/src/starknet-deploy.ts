@@ -47,9 +47,11 @@ async function deriveUserPrivKey(walletAddress: string): Promise<bigint> {
   const hashArray = new Uint8Array(hashBuffer);
   let privKey = BigInt("0x" + Array.from(hashArray).map(b => b.toString(16).padStart(2, "0")).join(""));
 
-  // Reduce to valid Stark range [1, N-1]
-  const STARK_ORDER = BigInt("0x800000000000010FFFFFFFFFFFFFFFFB781126DCAF7B47C2D58786687B5664D16D0210");
-  privKey = privKey % (STARK_ORDER - 1n) + 1n;
+  // Reduce to valid Stark field range [1, P-1]
+  // P = field prime (252 bits), NOT N = curve order (280 bits)
+  // @noble/curves validates private keys against the field prime
+  const STARK_FIELD_PRIME = BigInt("0x800000000000011000000000000000000000000000000000000000000000001");
+  privKey = privKey % (STARK_FIELD_PRIME - 1n) + 1n;
 
   return privKey;
 }

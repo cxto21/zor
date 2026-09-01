@@ -8,14 +8,9 @@ import {
   activateSession,
   checkSession,
   getProxyUrl,
-  verifyDeposit,
-  hasStrk20Support,
-  getDeployParams,
-  fundAccount,
   PROXY_WALLET,
   PRICE_PER_MINUTE,
   STRK20_CONTRACT,
-  PRIVACY_POOL_ADDRESS,
 } from './services/proxyService';
 
 type ViewMode = 'home' | 'browse';
@@ -44,7 +39,7 @@ const App: React.FC = () => {
   const [depositAddress, setDepositAddress] = useState<string | null>(null);
   const [depositAmount, setDepositAmount] = useState<string | null>(null);
   const [depositMinutes, setDepositMinutes] = useState<number>(0);
-  const [strk20Supported, setStrk20Supported] = useState<boolean>(false);
+
 
   // Restore session from localStorage on mount
   useEffect(() => {
@@ -101,38 +96,6 @@ const App: React.FC = () => {
     const interval = setInterval(tick, 15_000); // check every 15s
     return () => clearInterval(interval);
   }, [sessionToken]);
-
-  // Step 1: Get deposit address
-  const handleGetDepositAddress = async () => {
-    if (!account) {
-      setStatus('ERROR: Connect wallet first.');
-      return;
-    }
-
-    setIsLoading(true);
-    setStatus('Generating deposit address...');
-
-    try {
-      const result = await getDepositAddress(
-        account.address || account.selectedAddress,
-        minutes
-      );
-
-      if (result.success && result.depositAddress) {
-        setDepositAddress(result.depositAddress);
-        setDepositAmount(result.expectedAmount || '0');
-        setDepositMinutes(minutes);
-        setPayStep('deposit');
-        setStatus(`Deposit address generated. Send ${result.expectedAmount} STRK to continue.`);
-      } else {
-        setStatus(`ERROR: ${result.error}`);
-      }
-    } catch (error: any) {
-      setStatus(`ERROR: ${error.message}`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   // Step 2: Send STRK from connected wallet to deposit address
   const handleSendAndActivate = async () => {
@@ -291,131 +254,30 @@ const App: React.FC = () => {
     }
   };
 
-  // STRK20 Privacy Pool deposit — uses wallet's built-in ZK proof
-  const handleStrk20Deposit = async () => {
-    if (!account || !strk20Supported) return;
-
-    setIsLoading(true);
-    setStatus('Depositing to privacy pool via STRK20...');
-
-    try {
-      const amountWei = BigInt(Math.floor(minutes * PRICE_PER_MINUTE * 1e18));
-
-      // Step 1: Deposit into privacy pool via wallet's STRK20 API
-      // The wallet handles: approval, ZK proof generation, submission
-      const depositResult = await account.strk20InvokeTransaction([
-        {
-          type: 'deposit',
-          token: STRK20_CONTRACT,
-          amount: amountWei.toString(),
-        },
-      ]);
-
-      const txHash = depositResult.transaction_hash;
-      setStatus(`Deposit TX sent: ${txHash.slice(0, 16)}... Verifying on-chain...`);
-
-      // Step 2: Wait for confirmation
-      await new Promise(resolve => setTimeout(resolve, 10000));
-
-      // Step 3: Verify deposit via worker (worker checks on-chain event)
-      const verification = await verifyDeposit(
-        txHash,
-        account.address || account.selectedAddress,
-        amountWei.toString()
-      );
-
-      if (verification.success && verification.verified) {
-        // Step 4: Activate session
-        const activation = await activateSession(
-          account.address || account.selectedAddress,
-          'strk20-pool', // deposit address is the pool
-          minutes
-        );
-
-        if (activation.success && activation.token) {
-          setSessionToken(activation.token);
-          setSessionBalance(activation.balance || '0');
-          setPayStep('idle');
-          setDepositAddress(null);
-          setDepositAmount(null);
-          setStatus('SESSION ACTIVE (STRK20 Privacy Pool)');
-          setViewMode('browse');
-
-          localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
-          localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
-        } else {
-          setStatus(`ACTIVATION FAILED: ${activation.error}`);
-        }
-      } else {
-        setStatus(`VERIFICATION FAILED: ${verification.error || 'Deposit not found on-chain'}`);
-      }
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      if (msg.includes('user declined') || msg.includes('user rejected')) {
-        setStatus('Deposit cancelled by user.');
-      } else {
-        setStatus(`STRK20 DEPOSIT FAILED: ${msg.slice(0, 100)}`);
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   // Deploy per-user account via master account
-  const handleDeployAccount = async () => {
+  const handlePayAndActivate = async () => {
     if (!account) return;
 
     setIsLoading(true);
-    setStatus('Deploying per-user account...');
+    setStatus('Generating deposit address...');
 
     try {
-      const walletAddress = account.address || account.selectedAddress;
-      const depositAddr = depositAddress || '0x00';
-
-      // Step 1: Get deployment parameters from worker
-      const deployParams = await getDeployParams(depositAddr, walletAddress);
-
-      if (!deployParams.success || !deployParams.accountAddress || !deployParams.salt) {
-        setStatus(`DEPLOY FAILED: ${deployParams.error}`);
-        return;
-      }
-
-      setStatus(`Account address: ${deployParams.accountAddress.slice(0, 20)}... Deploying...`);
-
-      // Step 2: Fund the account from master (worker signs and broadcasts)
-      const fundingWei = BigInt(Math.floor(minutes * PRICE_PER_MINUTE * 1e18)).toString();
-      const fundResult = await fundAccount(deployParams.accountAddress, fundingWei);
-
-      if (!fundResult.success) {
-        setStatus(`FUND FAILED: ${fundResult.error}`);
-        return;
-      }
-
-      setStatus(`Account funded. TX: ${fundResult.txHash?.slice(0, 16)}...`);
-
-      // Step 3: Activate session using the new account
-      const activation = await activateSession(
-        deployParams.accountAddress,
-        deployParams.masterAddress || '',
+      const result = await getDepositAddress(
+        account.address || account.selectedAddress,
         minutes
       );
 
-      if (activation.success && activation.token) {
-        setSessionToken(activation.token);
-        setSessionBalance(activation.balance || '0');
-        setPayStep('idle');
-        setDepositAddress(null);
-        setDepositAmount(null);
-        setStatus('SESSION ACTIVE (Per-User Account)');
-        setViewMode('browse');
-
-        localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
-        localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
+      if (result.success && result.depositAddress) {
+        setDepositAddress(result.depositAddress);
+        setDepositAmount(result.expectedAmount || '0');
+        setDepositMinutes(minutes);
+        setPayStep('deposit');
+        setStatus(`Send ${result.expectedAmount} STRK to activate your session.`);
       } else {
-        setStatus(`ACTIVATION FAILED: ${activation.error}`);
+        setStatus(`ERROR: ${result.error}`);
       }
     } catch (error: any) {
-      setStatus(`DEPLOY FAILED: ${(error?.message || String(error)).slice(0, 100)}`);
+      setStatus(`ERROR: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -578,37 +440,14 @@ const App: React.FC = () => {
 
             <div className="flex gap-2">
               <button
-                onClick={handleDeployAccount}
+                onClick={handlePayAndActivate}
                 disabled={!isConnected || isLoading}
-                className="retro-border retro-button bg-green-700 text-white px-4 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
+                className="retro-border retro-button bg-blue-700 text-white px-6 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
               >
-                {isLoading ? 'DEPLOYING...' : '🔑 DEPLOY ACCOUNT'}
+                {isLoading ? 'GENERATING...' : '💳 PAY & ACTIVATE'}
               </button>
-
-              {strk20Supported ? (
-                <button
-                  onClick={handleStrk20Deposit}
-                  disabled={!isConnected || isLoading}
-                  className="retro-border retro-button bg-purple-700 text-white px-4 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
-                >
-                  {isLoading ? 'DEPOSITING...' : '🔒 DEPOSIT'}
-                </button>
-              ) : (
-                <button
-                  onClick={handleGetDepositAddress}
-                  disabled={!isConnected || isLoading}
-                  className="retro-border retro-button bg-blue-700 text-white px-4 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
-                >
-                  {isLoading ? 'GENERATING...' : 'GET DEPOSIT'}
-                </button>
-              )}
             </div>
           </div>
-          {strk20Supported && (
-            <p className="text-[9px] text-purple-600 font-bold">
-              🔒 Your wallet supports STRK20 privacy pool. Deposit is private — only the deposit event is public.
-            </p>
-          )}
           {!isConnected && (
             <p className="text-[10px] text-red-600 font-bold">Connect your Starknet wallet to proceed.</p>
           )}
@@ -751,7 +590,6 @@ const App: React.FC = () => {
 
           <WalletConnect onAccountChange={(acc) => {
             setAccount(acc);
-            setStrk20Supported(hasStrk20Support(acc));
           }} />
         </div>
       </nav>
