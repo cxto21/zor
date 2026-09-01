@@ -111,11 +111,9 @@ async function getWalletProvider(): Promise<any> {
         'standard:events': {
           on: (event: string, handler: Function) => {
             console.log('[ZOR] standard:events.on called:', event);
-            if (sn.on) sn.on(event, handler);
-            // Return unsubscribe function
-            return () => {
-              if (sn.off) sn.off(event, handler);
-            };
+            // starknetkit doesn't support "change" events — silently ignore
+            // Return a no-op unsubscribe function
+            return () => {};
           }
         },
         'wallet_getPermissions': {
