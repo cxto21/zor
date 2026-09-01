@@ -1,0 +1,11 @@
+[package]
+name = "zor_paymaster"
+version = "0.1.0"
+edition = "2024_07"
+
+[dependencies]
+starknet = ">=2.10.0"
+
+[[target.starknet-contract]]
+casm = true
+sierra = true

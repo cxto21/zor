@@ -25,3 +25,4 @@ dist-ssr
 worker/.master-account.env
 worker/.tmp/
 worker/vault/node_modules/
+.env

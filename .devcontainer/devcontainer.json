@@ -1,0 +1,9 @@
+{
+  "name": "Zor Privacy Network",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-24-bookworm",
+  "postCreateCommand": "npm install",
+  "forwardPorts": [5173],
+  "codespaces": {
+    "idleTimeoutMinutes": -1
+  }
+}

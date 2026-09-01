@@ -4,6 +4,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 interface BrowserProps {
   proxyUrl: string | null;
   isLoading: boolean;
+  maximized?: boolean;
   onLoadStart?: () => void;
   onLoadEnd?: () => void;
   onError?: (error: string) => void;
@@ -14,6 +15,7 @@ const MAX_URL_DISPLAY_LENGTH = 60;
 const Browser: React.FC<BrowserProps> = ({
   proxyUrl,
   isLoading,
+  maximized = false,
   onLoadStart,
   onLoadEnd,
   onError,
@@ -131,7 +133,7 @@ const Browser: React.FC<BrowserProps> = ({
     : 'about:blank';
 
   return (
-    <div className="retro-border flex flex-col h-full min-h-[400px]">
+    <div className={`retro-border flex flex-col ${maximized ? 'h-[calc(100vh-80px)]' : 'h-full min-h-[400px]'}`}>
       {/* Title bar */}
       <div className="win95-title">
         <div className="flex items-center gap-2">
@@ -227,7 +229,7 @@ const Browser: React.FC<BrowserProps> = ({
       <div className="retro-border-inset flex-1 bg-white relative min-h-[350px]">
         {/* Empty state — no URL loaded */}
         {!proxyUrl && !error && (
-          <div className="flex flex-col items-center justify-center h-full min-h-[350px] text-center p-6">
+          <div className={`flex flex-col items-center justify-center h-full ${maximized ? '' : 'min-h-[350px]'} text-center p-6`}>
             <div className="text-6xl mb-4 opacity-30">🌐</div>
             <h2 className="text-2xl font-bold font-['VT323'] text-gray-400 tracking-widest mb-2">
               ZOR PROXY BROWSER
@@ -249,7 +251,7 @@ const Browser: React.FC<BrowserProps> = ({
 
         {/* Error state */}
         {error && (
-          <div className="flex flex-col items-center justify-center h-full min-h-[350px] text-center p-6">
+          <div className={`flex flex-col items-center justify-center h-full ${maximized ? '' : 'min-h-[350px]'} text-center p-6`}>
             <div className="text-5xl mb-4">⚠️</div>
             <h3 className="text-lg font-bold font-['VT323'] text-red-700 tracking-wide mb-2">
               CONNECTION ERROR
@@ -276,7 +278,7 @@ const Browser: React.FC<BrowserProps> = ({
           <iframe
             ref={iframeRef}
             src={proxyUrl}
-            className="w-full h-full border-0 min-h-[350px]"
+            className={`w-full h-full border-0 ${maximized ? '' : 'min-h-[350px]'}`}
             title="Proxy Browser"
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
             onLoad={handleIframeLoad}

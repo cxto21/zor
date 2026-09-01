@@ -1,0 +1,81 @@
+
+
+///
+///
+///
+///
+///
+
+
+new.agent.(name="Supervisor","","","")
+new.agent.(name="Researcher","","","")
+new.agent.(name="Writter","","","")
+new.agent.(name="Manager","","","")
+
+
+new.knowledge.(id="Knowledge1",abstract="",tags="","",domain="",c="",)
+new.knowledge.(id="Knowledge1",abstract="",tags="","",domain="",c="",)
+new.knowledge.(id="Knowledge1",abstract="",tags="","",domain="",c="",)
+
+
+NaiamStudioTeams=["","","",""] ->   "" - [{""}] =
+NaiamStudioAgents=["","","",""] ->   "" - [{""}] =
+NaiamStudioMemories=["","","",""] ->   "" - [{""}] =
+NaiamStudioProjects=["","","",""] ->   "" - [{""}] =
+NaiamStudioTemplates=["","","",""] ->   "" - [{""}] =
+NaiamStudioProtocols=["","","",""] ->   "" - [{""}] =
+NaiamStudioChannels=["","","",""] ->   "" - [{""}] =
+NaiamStudioIntegrations=["","","",""] -> "" - [{""}]    =
+NaiamStudioKnowledge=["","","",""] ->
+NaiamStudioTasks=["","","",""] ->
+NaiamStudioWorkflows=["","","",""] ->
+NaiamStudioMembers=["","","",""] ->
+NaiamStudioRoles=["","","",""] ->
+---
+
+
+
+""
+)= ? 
+
+asdñfaj
+)= ? 
+
+asdñfaj
+)= ? 
+
+asdñfaj
+
+
+Enarge = "{}" -> {"status","logs","memoryes","decisions","skills","tools","projects","supervisors","rbac","clients","mantainers","versions",""}
+Enarge = "{}" -> {"status","logs","memoryes","decisions","skills","tools","projects","supervisors","rbac","clients","mantainers","versions",""}---
+Enarge = "{}" -> {"status","logs","memoryes","decisions","skills","tools","projects","supervisors","rbac","clients","mantainers","versions",""}
+Enarge = "{}" -> {"status","logs","memoryes","decisions","skills","tools","projects","supervisors","rbac","clients","mantainers","versions",""}
+Enarge = "{}" -> {"status","logs","memoryes","decisions","skills","tools","projects","supervisors","rbac","clients","mantainers","versions",""}
+
+
+
+
+
+NaiamStudio.Workflows=filter(tags.CommonHackatons)= [
+    {"name="BrainstormingProduct"=" } = Steps={{},{},{}}
+    {"name="ResearchingCompetitors"=" } = Steps={{},{},{}}
+    {"name="PlanningProduct"=" } = Steps={{},{},{}}
+    {"name="ProofOfConceptProduct"=" } = Steps={{},{},{}}
+    {"name="VideoExplainingProductProposal"=" } = Steps={{},{},{}}
+    {"name="PlanningProduct"=" } = Steps={{},{},{}}
+    
+
+ExampleProjects.add[
+    "Name:" "Zor",
+    "Description": "Zor is an proxy browser that allows users to pay over STRK20 privacy pool.",
+    "Roadmapv1.0": "",
+    
+
+]
+
+
+
+
+
+

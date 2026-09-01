@@ -1,8 +1,8 @@
-# Zor Proxy Browser!!!
+# Zor Proxy Browser
 
-Observe the ZKrrr. Developed at the first STRK20 Hackathon. 2026. No sinful economic pretensions.
-
-Anonymous web proxy on Starknet with STRK20 micropayments. 
+- Developed at the first STRK20 Hackathon. 2026. No sinful economic pretensions.
+!!
+Anonymous web proxy on Starknet with STRK20 micropayments. --- Trying the next info
 
 ## Architecture v0.1 (PoC)
 

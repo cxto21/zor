@@ -1,0 +1,1 @@
+{"version":1,"contracts":[{"id":"8jfg3tnc5qd1e","package_name":"zor_paymaster","contract_name":"ZorPaymaster","module_path":"zor_paymaster::ZorPaymaster","artifacts":{"sierra":"zor_paymaster_ZorPaymaster.contract_class.json","casm":"zor_paymaster_ZorPaymaster.compiled_contract_class.json"}}]}

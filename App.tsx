@@ -1,6 +1,5 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
-import RetroWindow from './components/RetroWindow';
 import WalletConnect from './components/WalletConnect';
 import Browser from './components/Browser';
 import {
@@ -9,18 +8,17 @@ import {
   checkSession,
   getProxyUrl,
   hasStrk20Support,
-  PROXY_WALLET,
   PRICE_PER_MINUTE,
   STRK20_CONTRACT,
 } from './services/proxyService';
 
 type ViewMode = 'home' | 'browse';
-type PayStep = 'idle' | 'deposit' | 'funded' | 'activating';
+type PayStep = 'idle' | 'deposit' | 'funded';
 
 const MINUTE_OPTIONS = [15, 30, 60, 120];
 const SESSION_TOKEN_KEY = 'zor_session_token';
-const SESSION_DEPOSIT_KEY = 'zor_session_deposit';
 const SESSION_BALANCE_KEY = 'zor_session_balance';
+const SESSION_URL_KEY = 'zor_session_url';
 
 const App: React.FC = () => {
   const [account, setAccount] = useState<any>(null);
@@ -35,6 +33,7 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [timeRemaining, setTimeRemaining] = useState<string>('');
   const [browserLoading, setBrowserLoading] = useState<boolean>(false);
+  const [maximized, setMaximized] = useState<boolean>(false);
 
   // Pay flow state
   const [payStep, setPayStep] = useState<PayStep>('idle');
@@ -42,22 +41,27 @@ const App: React.FC = () => {
   const [depositAmount, setDepositAmount] = useState<string | null>(null);
   const [depositMinutes, setDepositMinutes] = useState<number>(0);
 
-
   // Restore session from localStorage on mount
   useEffect(() => {
     const savedToken = localStorage.getItem(SESSION_TOKEN_KEY);
     const savedBalance = localStorage.getItem(SESSION_BALANCE_KEY);
+    const savedUrl = localStorage.getItem(SESSION_URL_KEY);
     if (savedToken) {
       (async () => {
         const result = await checkSession(savedToken);
         if (result.valid) {
           setSessionToken(savedToken);
           setSessionBalance(result.balance || '0');
+          if (savedUrl) {
+            setUrl(savedUrl);
+            setProxyUrl(getProxyUrl(savedUrl, savedToken));
+          }
           setViewMode('browse');
           setStatus('SESSION RESTORED');
         } else {
           localStorage.removeItem(SESSION_TOKEN_KEY);
           localStorage.removeItem(SESSION_BALANCE_KEY);
+          localStorage.removeItem(SESSION_URL_KEY);
         }
       })();
     }
@@ -76,10 +80,12 @@ const App: React.FC = () => {
         setSessionToken(null);
         setSessionBalance(null);
         setProxyUrl('');
-        setStatus('SESSION EXPIRED — insufficient balance');
+        setStatus('SESSION EXPIRED');
         setTimeRemaining('');
         localStorage.removeItem(SESSION_TOKEN_KEY);
         localStorage.removeItem(SESSION_BALANCE_KEY);
+        localStorage.removeItem(SESSION_URL_KEY);
+        setViewMode('home');
         return;
       }
 
@@ -90,181 +96,18 @@ const App: React.FC = () => {
       setTimeRemaining(hrs > 0 ? `${hrs}h ${m}m` : `${m}m`);
 
       if (result.lowBalance) {
-        setStatus(`LOW BALANCE — ${result.balance} STRK remaining. Top up soon!`);
+        setStatus(`LOW BALANCE — ${result.balance} STRK remaining`);
       }
     };
 
     tick();
-    const interval = setInterval(tick, 15_000); // check every 15s
+    const interval = setInterval(tick, 15_000);
     return () => clearInterval(interval);
   }, [sessionToken]);
 
-  // Step 2: Send STRK from connected wallet to deposit address
-  const handleSendAndActivate = async () => {
-    if (!account || !depositAddress || !depositAmount) return;
-
-    setIsLoading(true);
-    setStatus(strk20Supported ? 'Sending STRK20 private transfer...' : 'Sending STRK from wallet...');
-
-    try {
-      const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 1e18));
-      const amountHex = '0x' + amountWei.toString(16);
-      const recipientHex = depositAddress.toLowerCase();
-
-      let txHash: string | null = null;
-
-      if (strk20Supported && typeof account.strk20InvokeTransaction === 'function') {
-        // STRK20 private transfer via wallet API (from shielded balance)
-        setStatus('Generating ZK proof via wallet...');
-        try {
-          const result = await account.strk20InvokeTransaction([
-            {
-              type: 'transfer',
-              token: STRK20_CONTRACT,
-              amount: amountHex,
-              recipient: recipientHex,
-            },
-          ]);
-          txHash = result?.transaction_hash || null;
-          if (!txHash) {
-            // Ready X wallet bug: tx submitted but no hash returned
-            setStatus('STRK20 transfer submitted. Check wallet for status.');
-          }
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          if (msg.includes('WALLET_TIMEOUT') || msg.includes('timeout')) {
-            setStatus('STRK20 transfer submitted (wallet timeout). Proceeding...');
-          } else if (msg.includes('USER_REFUSED') || msg.includes('user declined') || msg.includes('user rejected')) {
-            setStatus('Payment cancelled by user.');
-            setPayStep('deposit');
-            setIsLoading(false);
-            return;
-          } else {
-            throw e;
-          }
-        }
-      } else {
-        // Fallback: plain ERC20 transfer
-        const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
-        const amountHigh = amountWei >> BigInt(128);
-        const paddedAddress = depositAddress.toLowerCase().replace('0x', '').padStart(64, '0');
-
-        let result: any = null;
-        try {
-          result = await account.execute(
-            {
-              contractAddress: STRK20_CONTRACT,
-              entrypoint: 'transfer',
-              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)],
-            },
-            { version: 0x3, resourceBounds: {
-              l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
-              l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
-              l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
-            }}
-          );
-        } catch {
-          result = await account.execute(
-            {
-              contractAddress: STRK20_CONTRACT,
-              entrypoint: 'transfer',
-              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)],
-            },
-            { version: 0x1, maxFee: '0x1600000' }
-          );
-        }
-        txHash = result?.transaction_hash || null;
-      }
-
-      if (txHash) {
-        setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting for confirmation...`);
-        await new Promise(resolve => setTimeout(resolve, 8000));
-      }
-
-      // Activate session (for STRK20 pool transfers, worker trusts wallet confirmation)
-      setPayStep('funded');
-      setStatus('Verifying and activating session...');
-
-      const activation = await activateSession(
-        account.address || account.selectedAddress,
-        depositAddress,
-        depositMinutes
-      );
-
-      if (activation.success && activation.token) {
-        setSessionToken(activation.token);
-        setSessionBalance(activation.balance || '0');
-        setPayStep('idle');
-        setDepositAddress(null);
-        setDepositAmount(null);
-        setStatus(strk20Supported ? 'SESSION ACTIVE (STRK20 Private)' : 'SESSION ACTIVE');
-        setViewMode('browse');
-
-        localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
-        localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
-      } else {
-        setPayStep('deposit');
-        setStatus(`ACTIVATION FAILED: ${activation.error || 'Balance not yet available. Try "I sent it manually".'}`);
-      }
-    } catch (error: any) {
-      const msg = error?.message || String(error);
-      if (msg.includes('user declined') || msg.includes('user rejected')) {
-        setStatus('Payment cancelled by user.');
-      } else {
-        setStatus(`TX FAILED — use "I sent it manually": ${msg.slice(0, 80)}`);
-      }
-      setPayStep('deposit');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Manual "I've sent it" — show retry activate button
-  const handleFunded = () => {
-    setPayStep('funded');
-    setStatus('Click "Verify & Activate" once your TX is confirmed on Starknet.');
-  };
-
-  // Step 3: Activate session after funding
-  const handleActivate = async () => {
-    if (!account || !depositAddress) return;
-
-    setIsLoading(true);
-    setStatus('Checking balance...');
-
-    try {
-      const result = await activateSession(
-        account.address || account.selectedAddress,
-        depositAddress,
-        depositMinutes
-      );
-
-      if (result.success && result.token) {
-        setSessionToken(result.token);
-        setSessionBalance(result.balance || '0');
-        setPayStep('idle');
-        setDepositAddress(null);
-        setDepositAmount(null);
-        setStatus('SESSION ACTIVE');
-        setViewMode('browse');
-
-        localStorage.setItem(SESSION_TOKEN_KEY, result.token);
-        localStorage.setItem(SESSION_BALANCE_KEY, result.balance || '0');
-      } else {
-        setPayStep('deposit');
-        setStatus(`ACTIVATION FAILED: ${result.error || 'Insufficient balance'}`);
-      }
-    } catch (error: any) {
-      setStatus(`ERROR: ${error.message}`);
-      setPayStep('deposit');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // Deploy per-user account via master account
-  const handlePayAndActivate = async () => {
-    if (!account) return;
+  // PAY & BROWSE — generate deposit address
+  const handlePayAndBrowse = async () => {
+    if (!account || !url.trim()) return;
 
     setIsLoading(true);
     setStatus('Generating deposit address...');
@@ -280,7 +123,7 @@ const App: React.FC = () => {
         setDepositAmount(result.expectedAmount || '0');
         setDepositMinutes(minutes);
         setPayStep('deposit');
-        setStatus(`Send ${result.expectedAmount} STRK to activate your session.`);
+        setStatus(`Send ${result.expectedAmount} STRK to activate.`);
       } else {
         setStatus(`ERROR: ${result.error}`);
       }
@@ -291,11 +134,166 @@ const App: React.FC = () => {
     }
   };
 
+  // Send payment & activate
+  const handleSendPayment = async () => {
+    if (!account || !depositAddress || !depositAmount) return;
+
+    setIsLoading(true);
+    setStatus(strk20Supported ? 'Sending STRK20 private transfer...' : 'Sending STRK...');
+
+    try {
+      const amountWei = BigInt(Math.floor(parseFloat(depositAmount) * 1e18));
+      const amountHex = '0x' + amountWei.toString(16);
+      const recipientHex = depositAddress.toLowerCase();
+
+      let txHash: string | null = null;
+
+      if (strk20Supported && typeof account.strk20InvokeTransaction === 'function') {
+        setStatus('Generating ZK proof via wallet...');
+        try {
+          const result = await account.strk20InvokeTransaction([{
+            type: 'transfer',
+            token: STRK20_CONTRACT,
+            amount: amountHex,
+            recipient: recipientHex,
+          }]);
+          txHash = result?.transaction_hash || null;
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          if (msg.includes('WALLET_TIMEOUT') || msg.includes('timeout')) {
+            setStatus('Transfer submitted (wallet timeout). Proceeding...');
+          } else if (msg.includes('USER_REFUSED') || msg.includes('user declined') || msg.includes('user rejected')) {
+            setStatus('Payment cancelled.');
+            setPayStep('deposit');
+            setIsLoading(false);
+            return;
+          } else {
+            throw e;
+          }
+        }
+      } else {
+        const amountLow = amountWei & BigInt('0xffffffffffffffffffffffffffffffff');
+        const amountHigh = amountWei >> BigInt(128);
+        const paddedAddress = depositAddress.toLowerCase().replace('0x', '').padStart(64, '0');
+        let result: any = null;
+        try {
+          result = await account.execute(
+            { contractAddress: STRK20_CONTRACT, entrypoint: 'transfer',
+              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)] },
+            { version: 0x3, resourceBounds: {
+              l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
+              l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
+              l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
+            }}
+          );
+        } catch {
+          result = await account.execute(
+            { contractAddress: STRK20_CONTRACT, entrypoint: 'transfer',
+              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)] },
+            { version: 0x1, maxFee: '0x1600000' }
+          );
+        }
+        txHash = result?.transaction_hash || null;
+      }
+
+      if (txHash) {
+        setStatus(`TX sent: ${txHash.slice(0, 16)}... Waiting...`);
+        await new Promise(resolve => setTimeout(resolve, 8000));
+      }
+
+      // Activate session
+      setStatus('Activating session...');
+      const activation = await activateSession(
+        account.address || account.selectedAddress,
+        depositAddress,
+        depositMinutes
+      );
+
+      if (activation.success && activation.token) {
+        setSessionToken(activation.token);
+        setSessionBalance(activation.balance || '0');
+        setPayStep('idle');
+        setDepositAddress(null);
+        setDepositAmount(null);
+
+        // Auto-navigate to the URL
+        const formatted = url.startsWith('http') ? url : `https://${url}`;
+        const fullUrl = getProxyUrl(formatted, activation.token);
+        setProxyUrl(fullUrl);
+
+        localStorage.setItem(SESSION_TOKEN_KEY, activation.token);
+        localStorage.setItem(SESSION_BALANCE_KEY, activation.balance || '0');
+        localStorage.setItem(SESSION_URL_KEY, formatted);
+
+        setViewMode('browse');
+        setStatus(strk20Supported ? 'SESSION ACTIVE (STRK20 Private)' : 'SESSION ACTIVE');
+      } else {
+        setPayStep('deposit');
+        setStatus(`ACTIVATION FAILED: ${activation.error || 'Try "I sent it manually".'}`);
+      }
+    } catch (error: any) {
+      const msg = error?.message || String(error);
+      if (msg.includes('user declined') || msg.includes('user rejected')) {
+        setStatus('Payment cancelled.');
+      } else {
+        setStatus(`TX FAILED: ${msg.slice(0, 80)}`);
+      }
+      setPayStep('deposit');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleFunded = () => {
+    setPayStep('funded');
+    setStatus('Click "Verify & Activate" once TX is confirmed (~30s).');
+  };
+
+  const handleActivate = async () => {
+    if (!account || !depositAddress) return;
+    setIsLoading(true);
+    setStatus('Checking balance...');
+    try {
+      const result = await activateSession(
+        account.address || account.selectedAddress,
+        depositAddress,
+        depositMinutes
+      );
+      if (result.success && result.token) {
+        setSessionToken(result.token);
+        setSessionBalance(result.balance || '0');
+        setPayStep('idle');
+        setDepositAddress(null);
+        setDepositAmount(null);
+
+        const formatted = url.startsWith('http') ? url : `https://${url}`;
+        const fullUrl = getProxyUrl(formatted, result.token);
+        setProxyUrl(fullUrl);
+
+        localStorage.setItem(SESSION_TOKEN_KEY, result.token);
+        localStorage.setItem(SESSION_BALANCE_KEY, result.balance || '0');
+        localStorage.setItem(SESSION_URL_KEY, formatted);
+
+        setViewMode('browse');
+        setStatus('SESSION ACTIVE');
+      } else {
+        setPayStep('deposit');
+        setStatus(`FAILED: ${result.error || 'Insufficient balance'}`);
+      }
+    } catch (error: any) {
+      setStatus(`ERROR: ${error.message}`);
+      setPayStep('deposit');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleLoadUrl = useCallback(() => {
     if (!url.trim() || !sessionToken) return;
     const formatted = url.startsWith('http') ? url : `https://${url}`;
     setProxyUrl(getProxyUrl(formatted, sessionToken));
     setBrowserLoading(true);
+    localStorage.setItem(SESSION_URL_KEY, formatted);
   }, [url, sessionToken]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -306,301 +304,38 @@ const App: React.FC = () => {
     setSessionToken(null);
     setSessionBalance(null);
     setProxyUrl('');
+    setUrl('');
     setPayStep('idle');
     setDepositAddress(null);
     setStatus('Session ended.');
     localStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(SESSION_BALANCE_KEY);
-  };
-
-  const handleCancelPay = () => {
-    setPayStep('idle');
-    setDepositAddress(null);
-    setDepositAmount(null);
-    setStatus('');
+    localStorage.removeItem(SESSION_URL_KEY);
+    setViewMode('home');
   };
 
   const isConnected = !!account;
   const hasActiveSession = !!sessionToken;
   const totalCost = (minutes * PRICE_PER_MINUTE).toFixed(4);
 
-  const renderHome = () => (
-    <div className="space-y-4">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold text-blue-800 mb-2 font-['VT323'] tracking-widest">ZOR PROXY</h1>
-        <p className="text-sm italic">"Anonymous browsing, paid with STRK20."</p>
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-4">
-        <div className="space-y-4">
-          <p className="text-sm leading-relaxed">
-            Welcome to <strong>Zor</strong>. A proof-of-concept anonymous web proxy powered by
-            <strong> STRK20 micropayments</strong> on Starknet.
-          </p>
-          <div className="border-2 border-double border-blue-500 p-2 text-xs bg-blue-50">
-            <h4 className="font-bold text-blue-600 uppercase">How it works:</h4>
-            <ol className="mt-1 space-y-1 list-decimal list-inside">
-              <li>Connect your Starknet wallet</li>
-              <li>Get a deposit address & send STRK</li>
-              <li>Browse — balance is deducted in real time</li>
-            </ol>
-          </div>
-          <p className="text-[10px] leading-relaxed text-gray-600">
-            Traffic routes through a Cloudflare Worker with <strong>stealth-fetch</strong>.
-            Your real IP is never leaked — target sites see only the proxy edge.
-          </p>
-        </div>
-        <div className="flex flex-col items-center justify-center">
-          <div className="w-32 h-32 border-4 border-gray-400 bg-gray-300 flex items-center justify-center text-4xl shadow-inner">
-            🌐
-          </div>
-          <span className="text-[10px] uppercase mt-2">v0.2-LAB</span>
-        </div>
-      </div>
-
-      <div className="retro-border-inset p-2 bg-black text-green-500 font-mono text-xs">
-        <p>PROXY STATUS: READY</p>
-        <p>NETWORK: STARKNET SEPOLIA</p>
-        <p>STEALTH: ENABLED (raw TCP sockets)</p>
-        <p>PRIVACY: cf-* HEADERS STRIPPED</p>
-        <p>BILLING: BALANCE-BASED (deducts in real time)</p>
-      </div>
-
-      <div className="retro-border p-3 bg-gray-100">
-        <h4 className="font-bold text-xs uppercase border-b border-gray-400 pb-1 mb-2">Pricing</h4>
-        <div className="grid grid-cols-4 gap-2 text-center text-[10px]">
-          {MINUTE_OPTIONS.map(m => (
-            <div key={m} className="retro-border-inset p-2">
-              <span className="block font-bold text-sm">{m}</span>
-              <span className="text-gray-500">min</span>
-              <span className="block mt-1 font-bold text-blue-700">{(m * PRICE_PER_MINUTE).toFixed(3)} STRK</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderBrowse = () => (
-    <div className="space-y-4 h-full flex flex-col">
-      {/* Session Status Bar */}
-      <div className={`retro-border p-2 flex items-center justify-between ${hasActiveSession ? 'bg-green-100' : 'bg-red-100'}`}>
+  return (
+    <div className="min-h-screen bg-[#008080] flex flex-col">
+      {/* Nav bar */}
+      <nav className="retro-border bg-[#c0c0c0] px-3 py-1.5 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <span className={`w-2 h-2 rounded-full ${hasActiveSession ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></span>
-          <span className="text-xs font-bold uppercase">
-            {hasActiveSession ? `BALANCE: ${sessionBalance || '0'} STRK — ${timeRemaining}` : 'NO ACTIVE SESSION'}
-          </span>
+          <h1 className="text-sm font-bold font-['VT323'] tracking-widest text-blue-900">ZOR://PROXY</h1>
+          {hasActiveSession && (
+            <span className="text-[9px] font-mono text-green-700 bg-green-100 px-2 py-0.5 rounded">
+              {sessionBalance || '0'} STRK — {timeRemaining}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {hasActiveSession && (
-            <button
-              onClick={handleLogout}
-              className="text-[10px] text-red-600 underline font-bold"
-            >
-              [END SESSION]
+            <button onClick={handleLogout} className="text-[9px] text-red-600 font-bold hover:underline">
+              [END]
             </button>
           )}
-        </div>
-      </div>
-
-      {/* URL Bar */}
-      <div className="retro-border p-2 bg-[#c0c0c0] flex gap-2 items-center">
-        <span className="text-[10px] font-bold uppercase px-2">URL:</span>
-        <div className="retro-border-inset flex-1 flex items-center">
-          <span className="text-[10px] px-2 text-gray-500">https://</span>
-          <input
-            type="text"
-            value={url}
-            onChange={e => setUrl(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Enter a URL..."
-            disabled={!hasActiveSession}
-            className="w-full bg-white px-1 py-0.5 text-xs font-mono outline-none disabled:bg-gray-200"
-          />
-        </div>
-        <button
-          onClick={handleLoadUrl}
-          disabled={!hasActiveSession || !url.trim()}
-          className="retro-border retro-button bg-[#c0c0c0] px-4 py-1 text-[10px] font-bold uppercase disabled:opacity-50"
-        >
-          GO
-        </button>
-      </div>
-
-      {/* PAY FLOW */}
-      {!hasActiveSession && payStep === 'idle' && (
-        <div className="retro-border p-3 bg-gray-100 space-y-3">
-          <h4 className="font-bold text-xs uppercase">Purchase Proxy Time</h4>
-          <div className="flex gap-2 items-center">
-            <span className="text-[10px] font-bold uppercase">Minutes:</span>
-            {MINUTE_OPTIONS.map(m => (
-              <button
-                key={m}
-                onClick={() => setMinutes(m)}
-                className={`retro-border px-3 py-1 text-[10px] font-bold ${minutes === m ? 'retro-border-inset bg-blue-100' : 'bg-[#c0c0c0]'}`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-          <div className="flex justify-between items-center">
-            <span className="text-xs font-bold">Total: <span className="text-blue-700">{totalCost} STRK</span></span>
-
-            <div className="flex gap-2">
-              <button
-                onClick={handlePayAndActivate}
-                disabled={!isConnected || isLoading}
-                className="retro-border retro-button bg-blue-700 text-white px-6 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400"
-              >
-                {isLoading ? 'GENERATING...' : '💳 PAY & ACTIVATE'}
-              </button>
-            </div>
-          </div>
-          {!isConnected && (
-            <p className="text-[10px] text-red-600 font-bold">Connect your Starknet wallet to proceed.</p>
-          )}
-          {isConnected && strk20Supported && (
-            <p className="text-[9px] text-green-600 font-bold">
-              🔒 Ready wallet detected — payments use STRK20 private transfers.
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* DEPOSIT ADDRESS DISPLAY */}
-      {!hasActiveSession && payStep === 'deposit' && depositAddress && (
-        <div className="retro-border p-3 bg-yellow-50 space-y-3 border-2 border-yellow-400">
-          <h4 className="font-bold text-xs uppercase text-yellow-800">⚠ Send STRK to this address</h4>
-          <div className="retro-border-inset p-2 bg-white">
-            <div className="text-[10px] font-bold uppercase mb-1">Deposit Address:</div>
-            <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">
-              {depositAddress}
-            </div>
-          </div>
-          <div className="flex justify-between items-center text-xs">
-            <span>Amount: <span className="font-bold text-blue-700">{depositAmount} STRK</span></span>
-            <span className="text-gray-500">{depositMinutes} min</span>
-          </div>
-
-          {/* Primary: Send from connected wallet */}
-          <button
-            onClick={handleSendAndActivate}
-            disabled={isLoading}
-            className="retro-border retro-button bg-blue-700 text-white px-6 py-3 text-xs font-bold uppercase w-full disabled:opacity-50"
-          >
-            {isLoading ? 'SENDING...' : strk20Supported ? `🔒 SEND ${depositAmount} STRK20 PRIVATE` : `SEND ${depositAmount} STRK & ACTIVATE`}
-          </button>
-
-          {/* Fallback: manual send */}
-          <div className="flex gap-2">
-            <button
-              onClick={handleFunded}
-              className="retro-border retro-button bg-green-600 text-white px-4 py-2 text-xs font-bold uppercase flex-1"
-            >
-              I'VE SENT IT MANUALLY
-            </button>
-            <button
-              onClick={handleCancelPay}
-              className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase"
-            >
-              CANCEL
-            </button>
-          </div>
-
-          <p className="text-[9px] text-gray-500">
-            Click the button above to send from your connected wallet, or send manually and click "I've sent it".
-          </p>
-        </div>
-      )}
-
-      {/* FUNDED — waiting for balance confirmation */}
-      {!hasActiveSession && payStep === 'funded' && depositAddress && (
-        <div className="retro-border p-3 bg-blue-50 space-y-3 border-2 border-blue-400">
-          <h4 className="font-bold text-xs uppercase text-blue-800">⏳ Waiting for balance confirmation</h4>
-          <div className="retro-border-inset p-2 bg-white">
-            <div className="text-[10px] font-bold uppercase mb-1">Deposit Address:</div>
-            <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">
-              {depositAddress}
-            </div>
-          </div>
-          <p className="text-[10px] text-gray-600">
-            If you haven't sent yet, send <span className="font-bold">{depositAmount} STRK</span> to the address above.
-          </p>
-          <div className="flex gap-2">
-            <button
-              onClick={handleActivate}
-              disabled={isLoading}
-              className="retro-border retro-button bg-green-600 text-white px-6 py-2 text-xs font-bold uppercase flex-1 disabled:opacity-50"
-            >
-              {isLoading ? 'CHECKING...' : '✓ VERIFY & ACTIVATE'}
-            </button>
-            <button
-              onClick={handleCancelPay}
-              className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase"
-            >
-              CANCEL
-            </button>
-          </div>
-          <p className="text-[9px] text-gray-500">
-            Click "Verify & Activate" once your TX is confirmed on Starknet (usually ~30s).
-          </p>
-        </div>
-      )}
-
-      {/* Status */}
-      {status && (
-        <div className="retro-border-inset p-2 bg-gray-50 font-mono text-[10px]">
-          <span className="text-gray-500">[SYS]</span> {status}
-        </div>
-      )}
-
-      {/* Browser Frame */}
-      <div className="retro-border-inset flex-1 bg-white min-h-[400px]">
-        <Browser
-          proxyUrl={proxyUrl}
-          isLoading={browserLoading}
-          onLoadStart={() => setBrowserLoading(true)}
-          onLoadEnd={() => setBrowserLoading(false)}
-          onError={(err) => setStatus(`BROWSER ERROR: ${err}`)}
-        />
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="min-h-screen flex flex-col crt relative">
-      {/* Sticky Navbar */}
-      <nav className="sticky top-0 z-50 retro-border bg-[#c0c0c0] border-b-2 border-gray-400">
-        <div className="max-w-6xl mx-auto px-4 py-1.5 flex items-center gap-4">
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="text-lg font-bold font-['VT323'] text-blue-900 tracking-wider">ZOR</span>
-            <span className="text-[8px] text-gray-600 hidden sm:inline">v0.2-LAB</span>
-          </div>
-
-          <div className="flex gap-1">
-            <button
-              onClick={() => setViewMode('home')}
-              className={`px-3 py-1 text-[10px] font-bold retro-border ${viewMode === 'home' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
-            >
-              HOME
-            </button>
-            <button
-              onClick={() => setViewMode('browse')}
-              className={`px-3 py-1 text-[10px] font-bold retro-border ${viewMode === 'browse' ? 'retro-border-inset bg-gray-300' : 'bg-[#c0c0c0]'}`}
-            >
-              BROWSE
-            </button>
-          </div>
-
-          {hasActiveSession && (
-            <div className="hidden md:flex items-center gap-1.5 text-[10px] text-green-700 font-bold">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-              {sessionBalance} STRK — {timeRemaining}
-            </div>
-          )}
-
-          <div className="flex-1"></div>
-
           <WalletConnect onAccountChange={(acc) => {
             setAccount(acc);
             setStrk20Supported(hasStrk20Support(acc));
@@ -608,7 +343,7 @@ const App: React.FC = () => {
         </div>
       </nav>
 
-      {/* Marquee ticker */}
+      {/* Marquee */}
       <div className="bg-black overflow-hidden">
         <div className="whitespace-nowrap animate-marquee py-0.5 text-[10px] font-bold text-green-500 font-mono">
           ZOR_PROXY :: STRK20 ANONYMOUS PROXY LAB :: STEALTH MODE :: NO LOGS :: STARKNET POWERED :: ZERO-KNOWLEDGE PRIVACY ::
@@ -617,83 +352,203 @@ const App: React.FC = () => {
 
       {/* Main content */}
       <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-4">
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-          <section className="lg:col-span-3">
-            <RetroWindow
-              title={viewMode === 'home' ? 'ZOR:\\HOME.EXE' : 'ZOR:\\BROWSER.EXE'}
-              className="h-full min-h-[550px]"
-            >
-              {viewMode === 'home' ? renderHome() : renderBrowse()}
-            </RetroWindow>
-          </section>
+        {viewMode === 'home' && !hasActiveSession && (
+          <div className="space-y-4">
+            {/* Hero */}
+            <div className="text-center">
+              <h1 className="text-4xl font-bold text-white mb-2 font-['VT323'] tracking-widest drop-shadow-lg">ZOR PROXY</h1>
+              <p className="text-sm text-white/80 italic">Anonymous browsing, paid with STRK20.</p>
+            </div>
 
-          <aside className="space-y-4">
-            <RetroWindow title="SESSION_INFO" icon="⏱">
-              <div className="space-y-2 text-[10px]">
-                <div className="flex justify-between">
-                  <span className="font-bold uppercase">Status:</span>
-                  <span className={hasActiveSession ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
-                    {hasActiveSession ? 'ACTIVE' : 'INACTIVE'}
-                  </span>
-                </div>
-                {hasActiveSession && (
-                  <>
-                    <div className="flex justify-between">
-                      <span className="font-bold uppercase">Balance:</span>
-                      <span className="font-bold">{sessionBalance || '0'} STRK</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="font-bold uppercase">Time Left:</span>
-                      <span className="font-bold">{timeRemaining}</span>
-                    </div>
-                  </>
-                )}
-                <div className="flex justify-between">
-                  <span className="font-bold uppercase">Wallet:</span>
-                  <span>{isConnected ? `${(account.address || account.selectedAddress || '').slice(0, 8)}...` : 'NONE'}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="font-bold uppercase">Rate:</span>
-                  <span>{PRICE_PER_MINUTE} STRK/min</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="font-bold uppercase">Stealth:</span>
-                  <span className="text-green-600 font-bold">ENABLED</span>
+            {/* URL Input — main CTA */}
+            <div className="retro-border p-4 bg-white space-y-3">
+              <h4 className="font-bold text-xs uppercase text-gray-600">What do you want to browse?</h4>
+              <div className="flex gap-2 items-center">
+                <div className="retro-border-inset flex-1 flex items-center">
+                  <span className="text-xs px-2 text-gray-400 font-mono">https://</span>
+                  <input
+                    type="text"
+                    value={url}
+                    onChange={e => setUrl(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="example.com"
+                    disabled={!isConnected}
+                    className="w-full bg-white px-1 py-1.5 text-sm font-mono outline-none disabled:bg-gray-100"
+                  />
                 </div>
               </div>
-            </RetroWindow>
 
-            <div className="retro-border p-4 bg-gray-200 space-y-2">
-              <h4 className="text-[10px] font-bold uppercase underline">Proxy Network</h4>
-              <div className="w-full h-24 bg-black border-2 border-white relative overflow-hidden">
-                <div className="absolute inset-0 flex items-center justify-around opacity-40">
-                  <div className="w-1 h-12 bg-green-500 animate-pulse"></div>
-                  <div className="w-1 h-8 bg-green-500 animate-bounce"></div>
-                  <div className="w-1 h-16 bg-green-500 animate-pulse delay-75"></div>
-                  <div className="w-1 h-10 bg-green-500 animate-bounce delay-150"></div>
+              {/* Tier selection */}
+              <div className="flex gap-2 items-center">
+                <span className="text-[10px] font-bold uppercase text-gray-500">Time:</span>
+                {MINUTE_OPTIONS.map(m => (
+                  <button
+                    key={m}
+                    onClick={() => setMinutes(m)}
+                    className={`retro-border px-3 py-1 text-[10px] font-bold ${minutes === m ? 'retro-border-inset bg-blue-100 text-blue-800' : 'bg-[#c0c0c0]'}`}
+                  >
+                    {m}m — {(m * PRICE_PER_MINUTE).toFixed(3)} STRK
+                  </button>
+                ))}
+              </div>
+
+              {/* Pay button */}
+              {!isConnected ? (
+                <p className="text-[10px] text-red-600 font-bold">Connect your Starknet wallet to proceed.</p>
+              ) : (
+                <button
+                  onClick={handlePayAndBrowse}
+                  disabled={!url.trim() || isLoading}
+                  className="retro-border retro-button bg-blue-700 text-white px-6 py-2 text-xs font-bold uppercase disabled:opacity-50 disabled:bg-gray-400 w-full"
+                >
+                  {isLoading ? 'GENERATING...' : strk20Supported ? `🔒 PAY ${totalCost} STRK20 & BROWSE` : `💳 PAY ${totalCost} STRK & BROWSE`}
+                </button>
+              )}
+
+              {isConnected && strk20Supported && (
+                <p className="text-[9px] text-green-600 font-bold">🔒 Ready wallet — payments use STRK20 private transfers.</p>
+              )}
+            </div>
+
+            {/* Deposit address display */}
+            {payStep === 'deposit' && depositAddress && (
+              <div className="retro-border p-3 bg-yellow-50 space-y-3 border-2 border-yellow-400">
+                <h4 className="font-bold text-xs uppercase text-yellow-800">⚠ Send STRK to this address</h4>
+                <div className="retro-border-inset p-2 bg-white">
+                  <div className="text-[10px] font-bold uppercase mb-1">Deposit Address:</div>
+                  <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">{depositAddress}</div>
                 </div>
-                <div className="absolute bottom-1 right-1 text-[8px] text-green-500 font-mono">
-                  STEALTH: ACTIVE
+                <div className="flex justify-between items-center text-xs">
+                  <span>Amount: <span className="font-bold text-blue-700">{depositAmount} STRK</span></span>
+                  <span className="text-gray-500">{depositMinutes} min</span>
+                </div>
+                <button
+                  onClick={handleSendPayment}
+                  disabled={isLoading}
+                  className="retro-border retro-button bg-blue-700 text-white px-6 py-3 text-xs font-bold uppercase w-full disabled:opacity-50"
+                >
+                  {isLoading ? 'SENDING...' : strk20Supported ? `🔒 SEND ${depositAmount} STRK20 PRIVATE` : `SEND ${depositAmount} STRK & ACTIVATE`}
+                </button>
+                <div className="flex gap-2">
+                  <button onClick={handleFunded} className="retro-border retro-button bg-green-600 text-white px-4 py-2 text-xs font-bold uppercase flex-1">
+                    I'VE SENT IT MANUALLY
+                  </button>
+                  <button onClick={() => { setPayStep('idle'); setDepositAddress(null); setStatus(''); }}
+                    className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase">
+                    CANCEL
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Funded — waiting */}
+            {payStep === 'funded' && depositAddress && (
+              <div className="retro-border p-3 bg-blue-50 space-y-3 border-2 border-blue-400">
+                <h4 className="font-bold text-xs uppercase text-blue-800">⏳ Waiting for confirmation</h4>
+                <div className="retro-border-inset p-2 bg-white">
+                  <div className="font-mono text-[10px] break-all bg-gray-100 p-2 select-all">{depositAddress}</div>
+                </div>
+                <button
+                  onClick={handleActivate}
+                  disabled={isLoading}
+                  className="retro-border retro-button bg-green-600 text-white px-6 py-2 text-xs font-bold uppercase w-full disabled:opacity-50"
+                >
+                  {isLoading ? 'CHECKING...' : '✓ VERIFY & ACTIVATE'}
+                </button>
+                <button onClick={() => { setPayStep('idle'); setDepositAddress(null); setStatus(''); }}
+                  className="retro-border retro-button bg-gray-400 text-white px-3 py-2 text-xs font-bold uppercase w-full">
+                  CANCEL
+                </button>
+              </div>
+            )}
+
+            {/* Status */}
+            {status && (
+              <div className="retro-border-inset p-2 bg-black text-green-500 font-mono text-xs">
+                <p>{status}</p>
+              </div>
+            )}
+
+            {/* Info */}
+            <div className="retro-border p-3 bg-white/90">
+              <div className="grid grid-cols-2 gap-4 text-[10px]">
+                <div>
+                  <h4 className="font-bold uppercase text-gray-600 mb-1">How it works</h4>
+                  <ol className="space-y-0.5 list-decimal list-inside text-gray-500">
+                    <li>Connect your Starknet wallet</li>
+                    <li>Enter a URL & select time</li>
+                    <li>Pay with STRK/STRK20</li>
+                    <li>Browse anonymously</li>
+                  </ol>
+                </div>
+                <div>
+                  <h4 className="font-bold uppercase text-gray-600 mb-1">Privacy</h4>
+                  <ul className="space-y-0.5 text-gray-500">
+                    <li>• Your IP is never leaked</li>
+                    <li>• cf-* headers stripped</li>
+                    <li>• Stealth TCP sockets</li>
+                    <li>• Balance-based billing</li>
+                  </ul>
                 </div>
               </div>
             </div>
-          </aside>
-        </div>
+          </div>
+        )}
+
+        {/* BROWSE MODE */}
+        {(viewMode === 'browse' || hasActiveSession) && (
+          <div className={`space-y-2 ${maximized ? 'fixed inset-0 z-50 bg-[#008080] p-2' : ''}`}>
+            {/* URL Bar */}
+            <div className="retro-border p-2 bg-[#c0c0c0] flex gap-2 items-center">
+              <span className="text-[10px] font-bold uppercase px-2">URL:</span>
+              <div className="retro-border-inset flex-1 flex items-center">
+                <span className="text-[10px] px-2 text-gray-500">https://</span>
+                <input
+                  type="text"
+                  value={url}
+                  onChange={e => setUrl(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Enter a URL..."
+                  className="w-full bg-white px-1 py-0.5 text-xs font-mono outline-none"
+                />
+              </div>
+              <button
+                onClick={handleLoadUrl}
+                disabled={!url.trim()}
+                className="retro-border retro-button bg-[#c0c0c0] px-4 py-1 text-[10px] font-bold uppercase disabled:opacity-50"
+              >
+                GO
+              </button>
+              <button
+                onClick={() => setMaximized(!maximized)}
+                className="retro-border retro-button bg-[#c0c0c0] px-2 py-1 text-[10px] font-bold"
+                title={maximized ? 'Restore' : 'Maximize'}
+              >
+                {maximized ? '□' : '□'}
+              </button>
+            </div>
+
+            {/* Browser */}
+            <div className={maximized ? 'flex-1' : ''}>
+              <Browser
+                proxyUrl={proxyUrl}
+                isLoading={browserLoading}
+                maximized={maximized}
+                onLoadStart={() => setBrowserLoading(true)}
+                onLoadEnd={() => setBrowserLoading(false)}
+              />
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* Footer */}
-      <footer className="mt-auto bg-[#c0c0c0] retro-border border-t-2 border-gray-400 py-1 px-4 flex justify-between items-center text-[10px] font-bold">
-        <div className="flex gap-2 text-gray-700">
-          <span>[Wallet: {isConnected ? 'ON' : 'OFF'}]</span>
-          <span>[Session: {hasActiveSession ? 'ACTIVE' : 'NONE'}]</span>
-        </div>
-        <div className="flex gap-3">
-          <div className="retro-border-inset px-2 flex items-center gap-1">
-            <span className={hasActiveSession ? 'text-green-600' : 'text-red-600'}>●</span>
-            {hasActiveSession ? 'STEALTH_PROXY' : 'PROXY_IDLE'}
-          </div>
-        </div>
-      </footer>
+      {/* Status bar */}
+      <div className="retro-border p-0.5 px-3 bg-[#c0c0c0] flex items-center justify-between">
+        <span className="text-[8px] font-mono text-gray-600">
+          {hasActiveSession ? `✅ ACTIVE — ${sessionBalance || '0'} STRK — ${timeRemaining}` : '💤 No session'}
+        </span>
+        <span className="text-[8px] font-mono text-gray-600">ZOR v0.2 • STRK20 • STARKNET SEPOLIA</span>
+      </div>
     </div>
   );
 };
