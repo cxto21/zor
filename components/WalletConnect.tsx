@@ -88,13 +88,22 @@ async function getWalletProvider(): Promise<any> {
   // Method 3: Try to wrap window.starknet's request() into a features interface
   if (sn && typeof sn.request === 'function') {
     console.log('[ZOR] Creating wrapper for window.starknet with features interface...');
+    // Build the full wrapper with all methods WalletAccountV6 needs
     const wrapper = {
       ...sn,
+      // Ensure on/off are present (WalletAccountV6 needs them for event listening)
+      on: sn.on || ((event: string, handler: Function) => {
+        console.log('[ZOR] wrapper.on called:', event);
+        return sn;
+      }),
+      off: sn.off || ((event: string, handler: Function) => {
+        console.log('[ZOR] wrapper.off called:', event);
+        return sn;
+      }),
       features: {
         'standard:connect': {
           connect: async (opts: any) => {
             console.log('[ZOR] standard:connect called via wrapper');
-            // Call enable to get accounts
             const accounts = await sn.request({ type: 'wallet_requestAccounts', params: { silent: opts?.silent } });
             return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
           }
@@ -108,10 +117,30 @@ async function getWalletProvider(): Promise<any> {
           requestAccounts: async (opts: any) => {
             return await sn.request({ type: 'wallet_requestAccounts', params: opts });
           }
+        },
+        'wallet_addInvokeTransaction': {
+          addInvokeTransaction: async (params: any) => {
+            return await sn.request({ type: 'wallet_addInvokeTransaction', params });
+          }
+        },
+        'wallet_signMessage': {
+          signMessage: async (params: any) => {
+            return await sn.request({ type: 'wallet_signMessage', params });
+          }
+        },
+        'wallet_switchStarknetChain': {
+          switchStarknetChain: async (params: any) => {
+            return await sn.request({ type: 'wallet_switchStarknetChain', params });
+          }
+        },
+        'wallet_requestChainId': {
+          requestChainId: async () => {
+            return await sn.request({ type: 'wallet_requestChainId' });
+          }
         }
       }
     };
-    console.log('[ZOR] Wrapper created, features keys:', Object.keys(wrapper.features));
+    console.log('[ZOR] Wrapper created, features keys:', Object.keys(wrapper.features), 'has on:', typeof wrapper.on, 'has off:', typeof wrapper.off);
     return wrapper;
   }
 
