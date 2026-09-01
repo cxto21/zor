@@ -36,6 +36,89 @@ function hasStrk20Support(account: any): boolean {
   );
 }
 
+/**
+ * Discover wallet providers via EIP-6963.
+ * Returns a provider with features["standard:connect"] that WalletAccountV6 needs.
+ */
+async function discoverEip6963Wallets(): Promise<any[]> {
+  return new Promise((resolve) => {
+    const wallets: any[] = [];
+    const handler = (event: any) => {
+      const info = event?.detail?.info;
+      const provider = event?.detail?.provider;
+      if (provider && typeof provider === 'object') {
+        console.log('[ZOR] EIP-6963 wallet discovered:', info?.name, 'has features:', !!provider.features, 'features keys:', provider.features ? Object.keys(provider.features) : []);
+        wallets.push({ info, provider });
+      }
+    };
+
+    window.addEventListener('eip6963:announceProvider', handler);
+    // Trigger discovery
+    window.dispatchEvent(new CustomEvent('eip6963:requestProvider'));
+
+    // Wait a bit for wallets to announce themselves
+    setTimeout(() => {
+      window.removeEventListener('eip6963:announceProvider', handler);
+      console.log('[ZOR] EIP-6963 discovery complete, found', wallets.length, 'wallets');
+      resolve(wallets);
+    }, 500);
+  });
+}
+
+/** Get the raw wallet provider with features["standard:connect"] */
+async function getWalletProvider(): Promise<any> {
+  // Method 1: EIP-6963 discovery (returns providers with features)
+  console.log('[ZOR] Trying EIP-6963 wallet discovery...');
+  const eip6963Wallets = await discoverEip6963Wallets();
+
+  for (const w of eip6963Wallets) {
+    if (w.provider?.features?.['standard:connect']) {
+      console.log('[ZOR] Found EIP-6963 wallet with standard:connect:', w.info?.name);
+      return w.provider;
+    }
+  }
+
+  // Method 2: Check window.starknet.features (some wallets expose it directly)
+  const sn = (window as any)?.starknet;
+  if (sn?.features?.['standard:connect']) {
+    console.log('[ZOR] window.starknet has features["standard:connect"]');
+    return sn;
+  }
+
+  // Method 3: Try to wrap window.starknet's request() into a features interface
+  if (sn && typeof sn.request === 'function') {
+    console.log('[ZOR] Creating wrapper for window.starknet with features interface...');
+    const wrapper = {
+      ...sn,
+      features: {
+        'standard:connect': {
+          connect: async (opts: any) => {
+            console.log('[ZOR] standard:connect called via wrapper');
+            // Call enable to get accounts
+            const accounts = await sn.request({ type: 'wallet_requestAccounts', params: { silent: opts?.silent } });
+            return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
+          }
+        },
+        'wallet_getPermissions': {
+          getPermissions: async () => {
+            return await sn.request({ type: 'wallet_getPermissions' });
+          }
+        },
+        'wallet_requestAccounts': {
+          requestAccounts: async (opts: any) => {
+            return await sn.request({ type: 'wallet_requestAccounts', params: opts });
+          }
+        }
+      }
+    };
+    console.log('[ZOR] Wrapper created, features keys:', Object.keys(wrapper.features));
+    return wrapper;
+  }
+
+  console.warn('[ZOR] No wallet provider with standard:connect found');
+  return null;
+}
+
 const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [address, setAddress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -55,100 +138,21 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
     setStrk20Ready(hasStrk20Support(account));
   }, [onAccountChange, checkNetwork]);
 
-  /** Get the raw wallet extension (Ready/X) for STRK20 methods */
-  function getRawWallet(): any {
-    // The real wallet extension is NOT window.starknet (that's starknetkit's wrapper).
-    // The real wallet is a StarknetWindowObject with request() and standard:connect.
-    // Scan ALL window properties to find it.
-
-    console.log('[ZOR] Scanning window for wallet extensions...');
-    const candidates: [string, any][] = [];
-
-    // Check common injection points
-    const knownKeys = Object.keys(window).filter(k =>
-      k.toLowerCase().includes('stark') ||
-      k.toLowerCase().includes('wallet') ||
-      k.toLowerCase().includes('ready') ||
-      k.toLowerCase().includes('argent') ||
-      k.toLowerCase().includes('braavos')
-    );
-    console.log('[ZOR] Window keys matching wallet patterns:', knownKeys);
-
-    // Check each known key
-    for (const key of knownKeys) {
-      try {
-        const obj = (window as any)[key];
-        if (obj && typeof obj === 'object' && typeof obj.request === 'function') {
-          console.log(`[ZOR] ${key}:`, {
-            type: typeof obj,
-            constructor: obj?.constructor?.name,
-            hasRequest: true,
-            hasEnable: typeof obj.enable,
-            hasSelectedAddress: typeof obj.selectedAddress,
-            keys: Object.keys(obj).slice(0, 15),
-          });
-          candidates.push([key, obj]);
-        }
-      } catch {}
-    }
-
-    // Also check window.starknet in detail (NOT enumerable, so Object.keys misses it)
-    const sn = (window as any)?.starknet;
-    if (sn) {
-      console.log('[ZOR] window.starknet detail:', {
-        type: typeof sn,
-        constructor: sn?.constructor?.name,
-        keys: Object.keys(sn),
-        hasRequest: typeof sn?.request,
-        hasEnable: typeof sn?.enable,
-        hasAccount: typeof sn?.account,
-        accountKeys: sn?.account ? Object.keys(sn.account) : [],
-        accountProto: sn?.account ? Object.getOwnPropertyNames(Object.getPrototypeOf(sn.account)).slice(0, 20) : [],
-      });
-
-      // window.starknet IS the raw wallet — it has request() and enable()
-      // The issue is it's set via Object.defineProperty so Object.keys() misses it
-      if (typeof sn.request === 'function') {
-        console.log('[ZOR] window.starknet has request() — adding as candidate');
-        candidates.push(['starknet', sn]);
-      }
-    }
-
-    if (candidates.length === 0) {
-      console.warn('[ZOR] No wallet extensions found with request() method');
-      return null;
-    }
-
-    // Prefer candidates that look like raw wallet extensions (have enable or standard:connect)
-    const best = candidates.find(([, w]) => typeof w.enable === 'function' || typeof w['standard:connect'] === 'function')
-      || candidates[0];
-
-    console.log('[ZOR] Selected wallet:', best[0]);
-    return best[1];
-  }
-
-  /** Create WalletAccountV6 with STRK20 support from raw wallet */
-  async function createStrk20Account(rawWallet: any, preferredAddress?: string): Promise<any> {
+  /** Create WalletAccountV6 with STRK20 support from wallet provider */
+  async function createStrk20Account(walletProvider: any): Promise<any> {
     const provider = new RpcProvider({ nodeUrl: SEPOLIA_RPC });
     try {
-      console.log('[ZOR] Attempting WalletAccountV6.connect with raw wallet...');
-      console.log('[ZOR] Raw wallet type:', typeof rawWallet, 'constructor:', rawWallet?.constructor?.name);
-      console.log('[ZOR] Raw wallet methods:', Object.keys(rawWallet || {}).slice(0, 20));
-      const account = await WalletAccountV6.connect(provider, rawWallet);
-      console.log('[ZOR] WalletAccountV6 created:', {
+      console.log('[ZOR] Attempting WalletAccountV6.connect...');
+      console.log('[ZOR] Wallet provider features:', walletProvider?.features ? Object.keys(walletProvider.features) : 'none');
+      const account = await WalletAccountV6.connect(provider, walletProvider);
+      console.log('[ZOR] WalletAccountV6 created!', {
         address: account?.address,
         hasStrk20Invoke: typeof account?.strk20InvokeTransaction,
         hasStrk20Balances: typeof account?.strk20Balances,
-        methods: Object.getOwnPropertyNames(Object.getPrototypeOf(account)).filter(m => m.includes('strk20') || m.includes('Strk20')),
       });
       return account;
     } catch (e: any) {
       console.error('[ZOR] WalletAccountV6.connect FAILED:', e?.message || e);
-      console.error('[ZOR] Error stack:', e?.stack);
-      // Try to inspect what went wrong
-      try {
-        console.log('[ZOR] provider nodeUrl:', (provider as any)?.nodeUrl || 'unknown');
-      } catch {}
       return null;
     }
   }
@@ -175,10 +179,10 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         );
 
         if (addr && addr.toLowerCase() === savedAddress.toLowerCase()) {
-          // Try to create WalletAccountV6 with STRK20 support
-          const rawWallet = getRawWallet();
-          if (rawWallet) {
-            const strk20Account = await createStrk20Account(rawWallet, addr);
+          // Try EIP-6963 / features-based wallet for STRK20
+          const walletProvider = await getWalletProvider();
+          if (walletProvider) {
+            const strk20Account = await createStrk20Account(walletProvider);
             if (strk20Account) {
               initAccount(strk20Account, addr, connectorData?.chainId);
               return;
@@ -233,15 +237,12 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         throw new Error("Could not determine wallet address.");
       }
 
-      // Try to create WalletAccountV6 with STRK20 support
-      const rawWallet = getRawWallet();
+      // Try EIP-6963 / features-based wallet for STRK20
+      const walletProvider = await getWalletProvider();
       let account: any = null;
 
-      console.log('[ZOR] Raw wallet available:', !!rawWallet);
-
-      if (rawWallet) {
-        account = await createStrk20Account(rawWallet, addr);
-        console.log('[ZOR] STRK20 account from WalletAccountV6:', !!account, 'has strk20Invoke:', typeof account?.strk20InvokeTransaction);
+      if (walletProvider) {
+        account = await createStrk20Account(walletProvider);
       }
 
       // Fallback: use starknetkit account
@@ -261,7 +262,6 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
       console.log('[ZOR] Final account:', {
         address: account.address || account.selectedAddress,
         hasStrk20Invoke: typeof account.strk20InvokeTransaction,
-        type: account.constructor?.name,
       });
 
       initAccount(account, addr, connectorData?.chainId);
@@ -301,14 +301,12 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
 
   return (
     <div className="flex items-center gap-2">
-      {/* Network warning — compact pill */}
       {wrongNetwork && (
         <span className="text-[9px] bg-yellow-400 text-black font-bold px-2 py-0.5 rounded">
           WRONG NETWORK
         </span>
       )}
 
-      {/* Error — compact */}
       {error && (
         <span className="text-[9px] bg-red-600 text-white font-bold px-2 py-0.5 rounded max-w-[200px] truncate" title={error}>
           ✗ {error.length > 30 ? error.slice(0, 30) + '…' : error}
