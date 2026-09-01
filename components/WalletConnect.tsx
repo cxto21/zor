@@ -108,6 +108,16 @@ async function getWalletProvider(): Promise<any> {
             return { accounts: Array.isArray(accounts) ? accounts.map((a: string) => ({ address: a })) : [] };
           }
         },
+        'standard:events': {
+          on: (event: string, handler: Function) => {
+            console.log('[ZOR] standard:events.on called:', event);
+            if (sn.on) sn.on(event, handler);
+            // Return unsubscribe function
+            return () => {
+              if (sn.off) sn.off(event, handler);
+            };
+          }
+        },
         'wallet_getPermissions': {
           getPermissions: async () => {
             return await sn.request({ type: 'wallet_getPermissions' });
