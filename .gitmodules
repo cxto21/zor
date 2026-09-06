@@ -1,0 +1,3 @@
+[submodule "wally"]
+	path = wally
+	url = https://github.com/cxto21/wally.git
