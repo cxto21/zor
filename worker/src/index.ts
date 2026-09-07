@@ -168,14 +168,17 @@ async function rpcCall(
   });
   let result: JsonRpcResponse;
   try {
-    result = await response.json();
-  } catch (e) {
-    // Alchemy and other RPC providers sometimes return plain text errors
-    // instead of JSON. Read the raw body and create a minimal error object.
+    // Read body as text first to avoid "Body has already been used" error
+    // when response.json() subsequently fails (Alchemy returns plain text
+    // like "Must be authenticated!" instead of JSON).
     const text = await response.text();
+    result = await JSON.parse(text);
+  } catch (e) {
+    // Parsing failed — Alchemy may return plain text errors; surface them
+    // cleanly instead of letting the SyntaxError propagate uncaught.
     result = {
       error: {
-        message: text || "RPC request failed",
+        message: (e as Error).message || "RPC request failed",
         code: -32603,
       },
     };
