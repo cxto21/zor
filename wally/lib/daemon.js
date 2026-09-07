@@ -33,6 +33,43 @@ const RECORDS_DIR = path.join(__dirname, '..', '.records');
 const DAEMON_PID_FILE = path.join(WALLY_DIR, 'daemon.pid');
 const DAEMON_STATE_FILE = path.join(WALLY_DIR, 'daemon-state.json');
 
+
+//
+// Structured logging utility
+const log = {
+  info: function(message, data = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level: "info",
+      daemon: "WallyDaemon",
+      ...data,
+      message
+    };
+    console.log(JSON.stringify(entry));
+  },
+  warn: function(message, data = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level: "warn",
+      daemon: "WallyDaemon",
+      ...data,
+      message
+    };
+    console.warn(JSON.stringify(entry));
+  },
+  error: function(message, data = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level: "error",
+      daemon: "WallyDaemon",
+      ...data,
+      message
+    };
+    console.error(JSON.stringify(entry));
+  }
+};
+
+
 class WallyDaemon {
   constructor() {
     this.browser = null;
@@ -794,4 +831,4 @@ class WallyDaemon {
   }
 }
 
-module.exports = { WallyDaemon };
+module.exports = { WallyDaemon, log };

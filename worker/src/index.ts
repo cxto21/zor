@@ -19,6 +19,8 @@
  */
 
 import { request as stealthRequest } from "stealth-fetch/web";
+import { createVaultService } from "../vault/vault-service";
+import { ensureProverUrl, pauseProverVm } from "./prover-on-demand";
 
 // ============================================================================
 // Types
@@ -34,6 +36,8 @@ interface Env {
   MASTER_PUBLIC_KEY: string;
   MASTER_ADDRESS: string;
   MASTER_ACCOUNT_CLASS_HASH: string;
+  PROVING_SERVICE_URL?: string;
+  FREESTYLE_API_KEY?: string;
 }
 
 interface SessionData {
@@ -1377,6 +1381,245 @@ async function handleShieldStatus(env: Env): Promise<Response> {
 }
 
 // ============================================================================
+// Vault Service Handlers — Master-Receiver Pivot
+// Real VIRTUAL_SNOS proof needs PROVING_SERVICE_URL
+// (ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2 on Fly/Railway)
+// with 10-block maturity (provingBlockId = head-10).
+// ============================================================================
+
+/**
+ * POST /register-master
+ * Registers master viewing key in pool 0x0254a6b... if not already registered.
+ * Master (0x12f8b...) is the single receiver; users private-transfer to it.
+ * Returns {txHash, alreadyRegistered?} — handles already-registered gracefully.
+ *
+ * On-demand prover: if PROVING_SERVICE_URL is empty but FREESTYLE_API_KEY is set,
+ * attempts to wake a prover VM from the zor-prover-ready snapshot (p99 <400ms branch,
+ * idleTimeout 65s → auto-pause). Falls back to CallMockProofProvider if Freestyle is unavailable
+ * or the host lacks AVX512 (current Freestyle AMD Milan SIGILL — mock preserves correct apply_actions calldata).
+ */
+async function handleRegisterMaster(request: Request, env: Env): Promise<Response> {
+  try {
+    if (!env.MASTER_PRIVATE_KEY || !env.MASTER_ADDRESS || !env.STARKNET_RPC_URL) {
+      return errorResponse("Master account not configured", 500);
+    }
+
+    // On-demand wake: reuse FREESTYLE_API_KEY to branch zor-prover-ready when env URL is empty
+    let effectiveProverUrl = env.PROVING_SERVICE_URL;
+    if (!effectiveProverUrl && env.FREESTYLE_API_KEY) {
+      const ensured = await ensureProverUrl(env);
+      if (ensured.url) effectiveProverUrl = ensured.url;
+      else console.warn("[register-master] prover ensure fell back to mock:", (ensured as { reason?: string }).reason);
+    }
+
+    const vaultService = createVaultService({
+      STARKNET_RPC_URL: env.STARKNET_RPC_URL,
+      MASTER_ADDRESS: env.MASTER_ADDRESS,
+      MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
+      PROVING_SERVICE_URL: effectiveProverUrl,
+    });
+
+    // If prover not configured, we can still build a mock CallAndProof for local dev
+    // but warn the caller that settlement will need a real prover.
+    const isMock = vaultService.isMockProver();
+
+    try {
+      const result = await vaultService.register();
+      // In mock mode we return the call structure rather than a txHash (no broadcast)
+      // Real settlement would submit result.call with result.proofFacts via V3 invoke.
+      return jsonResponse({
+        success: true,
+        txHash: null,
+        call: result.call,
+        proofFacts: result.proofFacts,
+        proofOutput: result.proofOutput,
+        mock: isMock,
+        message: isMock
+          ? "Master register built with CallMockProofProvider (local dev). Set PROVING_SERVICE_URL for real VIRTUAL_SNOS proof."
+          : "Master register proof built; submit via apply_actions to settle.",
+      });
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      // Pool reverts if already registered — treat as success with alreadyRegistered flag
+      if (
+        msg.toLowerCase().includes("already registered") ||
+        msg.toLowerCase().includes("viewing key already") ||
+        msg.includes("0x5265676973746572656420") // "Registered " in felt
+      ) {
+        return jsonResponse({
+          success: true,
+          alreadyRegistered: true,
+          message: "Master already registered in pool",
+          mock: isMock,
+        });
+      }
+      throw e;
+    }
+  } catch (error: any) {
+    console.error("Register-master error:", error);
+    return errorResponse(`Register-master failed: ${error.message}`, 500);
+  }
+}
+
+/**
+ * POST /verify-private-transfer
+ * Body: { walletAddress: string, minutes?: number, expectedAmountWei?: string }
+ * Checks if master received a private transfer from walletAddress via discoverNotes.
+ * Amount check: >= PRICE_PER_MINUTE * minutes, or minimum 0.001 STRK if not specified.
+ *
+ * If PROVING_SERVICE_URL is empty, returns {mock:true} — discovery still works via
+ * ContractDiscoveryProvider but prover-dependent flows are disabled.
+ */
+async function handleVerifyPrivateTransfer(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await request.json()) as {
+      walletAddress: string;
+      minutes?: number;
+      expectedAmountWei?: string;
+    };
+
+    if (!body.walletAddress) {
+      return errorResponse("Missing walletAddress");
+    }
+
+    if (!env.MASTER_PRIVATE_KEY || !env.MASTER_ADDRESS || !env.STARKNET_RPC_URL) {
+      return errorResponse("Master account not configured", 500);
+    }
+
+    // On-demand wake before deciding mock vs real
+    let effectiveProverUrl = env.PROVING_SERVICE_URL;
+    if (!effectiveProverUrl && env.FREESTYLE_API_KEY) {
+      const ensured = await ensureProverUrl(env);
+      if (ensured.url) effectiveProverUrl = ensured.url;
+      else console.warn("[verify-private-transfer] prover ensure fell back to mock:", (ensured as { reason?: string }).reason);
+    }
+
+    const vaultService = createVaultService({
+      STARKNET_RPC_URL: env.STARKNET_RPC_URL,
+      MASTER_ADDRESS: env.MASTER_ADDRESS,
+      MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
+      PROVING_SERVICE_URL: effectiveProverUrl,
+    });
+
+    // Mock fallback: if still no prover, return mock response and log
+    if (vaultService.isMockProver()) {
+      console.warn("verify-private-transfer: PROVING_SERVICE_URL not configured, returning mock");
+      return jsonResponse({
+        success: true,
+        mock: true,
+        message: "Prover not configured — set PROVING_SERVICE_URL (e.g. https://zor-prover.fly.dev) or FREESTYLE_API_KEY for on-demand Freestyle prover. Returning mock=false paid check.",
+        paid: false,
+        amount: "0",
+      });
+    }
+
+    // Determine required amount
+    const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE || "0.001");
+    let requiredWei: bigint;
+    if (body.expectedAmountWei) {
+      requiredWei = BigInt(body.expectedAmountWei);
+    } else if (body.minutes) {
+      const expectedStrk = body.minutes * pricePerMinute;
+      requiredWei = BigInt(Math.floor(expectedStrk * 1e18));
+    } else {
+      requiredWei = BigInt("1000000000000000"); // 0.001 STRK minimum (PRICE_PER_MINUTE)
+    }
+
+    // Discovery via master viewing key: find incoming notes from sender
+    // Uses ContractDiscoveryProvider (on-chain reads); IndexerDiscoveryProvider preferred for prod but not exported in this bundle.
+    try {
+      const { notes } = await vaultService.discoverNotes();
+      // notes is AddressMap<Note[]> keyed by token address
+      let totalFromSender = 0n;
+      let matchedTxHash: string | undefined;
+
+      // STRK token key
+      const STRK = BigInt("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d");
+      const senderLower = body.walletAddress.toLowerCase();
+
+      // Check all token maps for notes from this sender
+      for (const [token, noteList] of notes.entries() as any) {
+        // Filter by token if we want STRK only — but check all for robustness
+        const isStrk = BigInt(token) === STRK;
+        if (!isStrk && notes.size > 1) {
+          // For non-STRK tokens, still count but log
+          console.warn("verify-private-transfer: found note for non-STRK token", token);
+        }
+        for (const note of noteList as any[]) {
+          const noteSender = note.sender ? (typeof note.sender === "string" ? note.sender : "0x" + BigInt(note.sender).toString(16)) : "";
+          if (noteSender.toLowerCase() === senderLower) {
+            totalFromSender += BigInt(note.amount);
+            // Note ID or witness could be used as txHash proxy; use note.id if available
+            if (!matchedTxHash && note.id) {
+              matchedTxHash = String(note.id);
+            }
+          }
+        }
+      }
+
+      const paid = totalFromSender >= requiredWei;
+
+      // Also try channel-based check as secondary (discoverChannels for sender)
+      if (!paid) {
+        try {
+          const channelsResult = await vaultService.discoverChannels([body.walletAddress] as never);
+          // If channels discovered, sender has interacted with pool (registered) — but amount still matters
+          console.warn("verify-private-transfer: channels check", JSON.stringify(channelsResult).slice(0, 500));
+        } catch (chErr) {
+          console.warn("verify-private-transfer: discoverChannels failed", chErr);
+        }
+      }
+
+      // If paid, create a session token so frontend can browse immediately (master-receiver model)
+      if (paid) {
+        const minutesToUse = body.minutes || Math.max(1, Math.floor(Number(totalFromSender) / 1e18 / pricePerMinute));
+        const balanceHex = "0x" + totalFromSender.toString(16);
+        const { token } = await createSession(
+          env,
+          body.walletAddress,
+          env.MASTER_ADDRESS, // depositAddress placeholder = master for private flow
+          minutesToUse,
+          balanceHex,
+        );
+        const balanceStrk = Number(totalFromSender) / 1e18;
+        return jsonResponse({
+          success: true,
+          paid,
+          amount: totalFromSender.toString(),
+          requiredWei: requiredWei.toString(),
+          txHash: matchedTxHash,
+          mock: false,
+          token,
+          balance: balanceStrk.toFixed(4),
+          minutesAvailable: Math.floor(balanceStrk / pricePerMinute),
+        });
+      }
+
+      return jsonResponse({
+        success: true,
+        paid,
+        amount: totalFromSender.toString(),
+        requiredWei: requiredWei.toString(),
+        txHash: matchedTxHash,
+        mock: false,
+      });
+    } catch (discoverErr: any) {
+      console.error("verify-private-transfer discover failed:", discoverErr);
+      return jsonResponse({
+        success: true,
+        paid: false,
+        amount: "0",
+        error: `Discovery failed: ${discoverErr.message}`,
+        mock: false,
+      });
+    }
+  } catch (error: any) {
+    console.error("Verify-private-transfer error:", error);
+    return errorResponse(`Verify-private-transfer failed: ${error.message}`, 500);
+  }
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -1443,6 +1686,33 @@ export default {
 
     if (path === "/shield-status" && request.method === "GET") {
       return handleShieldStatus(env);
+    }
+
+    if (path === "/register-master" && request.method === "POST") {
+      return handleRegisterMaster(request, env);
+    }
+
+    if (path === "/verify-private-transfer" && request.method === "POST") {
+      return handleVerifyPrivateTransfer(request, env);
+    }
+
+    // Prover on-demand ops: wake from snapshot, health probe, and explicit pause
+    if (path === "/prover-wake" && request.method === "POST") {
+      if (!env.FREESTYLE_API_KEY) return errorResponse("FREESTYLE_API_KEY not configured (wrangler secret put FREESTYLE_API_KEY)", 500);
+      const ensured = await ensureProverUrl(env);
+      if (ensured.url) return jsonResponse({ success: true, url: ensured.url, source: (ensured as { source: string }).source, vmId: (ensured as { vmId?: string }).vmId, domain: (ensured as { domain?: string }).domain });
+      return jsonResponse({ success: true, mock: true, reason: (ensured as { reason: string }).reason, message: "Falling back to CallMockProofProvider" });
+    }
+    if (path === "/prover-pause" && request.method === "POST") {
+      if (!env.FREESTYLE_API_KEY) return errorResponse("FREESTYLE_API_KEY not configured", 500);
+      const body = await request.json().catch(() => ({})) as { vmId?: string };
+      const vmId = body.vmId || "zor-prover-base";
+      const ok = await pauseProverVm(env.FREESTYLE_API_KEY, vmId);
+      return jsonResponse({ success: ok, vmId });
+    }
+    if (path === "/prover-status" && request.method === "GET") {
+      const ensured = await ensureProverUrl(env);
+      return jsonResponse({ success: true, ...ensured, provingUrl: (ensured as { url: string | null }).url, isMock: !(ensured as { url: string | null }).url });
     }
 
     if (path === "/" || path === "/health") {

@@ -11,6 +11,7 @@
   "dependencies": {
     "@starknet-io/get-starknet-discovery": "^5.0.0-beta.0",
     "@starknet-io/get-starknet-wallet-standard": "^5.0.0-beta.0",
+    "playwright": "^1.63.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "starknet": "^10.7.1",
@@ -19,7 +20,24 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "playwright-core": "^1.62.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
-  }
+  },
+  "description": "- Developed at the first STRK20 Hackathon. 2026. No sinful economic pretensions. !! Anonymous web proxy on Starknet with STRK20 micropayments. --- Trying the next info",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cxto21/zor.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/cxto21/zor/issues"
+  },
+  "homepage": "https://github.com/cxto21/zor#readme"
 }

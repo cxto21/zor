@@ -1,5 +1,5 @@
 /**
- * Vault Service — SDK-driven STRK20 privacy pool integration.
+ * Vault Service — SDK-driven STRK20 privacy pool integration (Master-Receiver Model).
  *
  * Replaces the broken ad-hoc mock (`compile_actions` via starknet_call) with the
  * OFFICIAL starknet-privacy SDK flow:
@@ -10,15 +10,24 @@
  *      and whose `.proof.proofFacts` carry the VIRTUAL_SNOS facts the pool validates
  *      in `accountDeploymentData`.
  *
- * The proving provider is `CallMockProofProvider` with `validateSignature: false`,
- * which falls back to the plain `compile_actions` VIEW — so it runs on any node
- * (Alchemy Sepolia included) without needing `simulateTransaction`.
+ * Master-Receiver Pivot: Single master account (0x12f8b...) is registered once in the pool.
+ * Users (already registered via Ready wallet) private-transfer STRK to MASTER_ADDRESS via
+ * wallet.strk20InvokeTransaction. Worker attributes payments by sender channel via discoverNotes.
+ *
+ * Proving: Uses ProvingServiceProofProvider when PROVING_SERVICE_URL is set (real VIRTUAL_SNOS
+ * proofs via transaction-prover). Falls back to CallMockProofProvider for local dev (Alchemy
+ * Sepolia without simulateTransaction). Real proofs need 10-block maturity (provingBlockId = head-10)
+ * so the blockifier can verify the block hash in proofFacts.
  *
  * NOTE: Settlement via `apply_actions` on the REAL Sepolia pool requires genuine
  * Virtual SNOS proofs (the pool validates `proof_facts` against the blockifier).
  * This service produces the correct upstream structure and is the foundation for
  * that; wiring a real prover (starknet-privacy prover / AVNU paymaster) or a devnet
  * with a mock-compatible pool swaps only the `provingProvider`.
+ *
+ * Prover requirement: real VIRTUAL_SNOS proof needs PROVING_SERVICE_URL
+ * (ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2 on Fly/Railway)
+ * with 10-block maturity (provingBlockId = head-10).
  */
 
 import {
@@ -28,7 +37,10 @@ import {
   constants,
   type Call,
 } from "starknet";
-import { createPrivateTransfers } from "@starkware-libs/starknet-privacy-sdk";
+import {
+  createPrivateTransfers,
+  ProvingServiceProofProvider,
+} from "@starkware-libs/starknet-privacy-sdk";
 import {
   CallMockProofProvider,
   ContractDiscoveryProvider,
@@ -64,7 +76,14 @@ export class VaultService {
   private poolContract: Contract;
   private privateTransfers: ReturnType<typeof createPrivateTransfers>;
 
-  constructor(private config: { rpcUrl: string; masterAddress: string; masterPrivateKey: string }) {
+  constructor(
+    private config: {
+      rpcUrl: string;
+      masterAddress: string;
+      masterPrivateKey: string;
+      provingServiceUrl?: string;
+    },
+  ) {
     this.provider = new RpcProvider({ nodeUrl: config.rpcUrl });
 
     // A real starknet.js Account is the `PrivateTransfersUser` the SDK expects:
@@ -77,24 +96,31 @@ export class VaultService {
     });
 
     // Typed contract instance used by ContractDiscoveryProvider (on-chain reads only).
+    // NOTE: ContractDiscoveryProvider is kept for now; IndexerDiscoveryProvider is preferred
+    // for prod (requires indexer URL, not yet deployed) but not exported in this env.
     this.poolContract = new Contract({
       abi: PrivacyPoolABI,
       address: POOL_CONTRACT_ADDRESS,
       providerOrAccount: this.provider,
     }).typedv2(PrivacyPoolABI);
 
+    // Proving provider: real VIRTUAL_SNOS via proving service if configured, else mock for local dev.
+    // Real prover: ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2
+    // Requires 10-block maturity (provingBlockId = head-10) so blockifier can verify block hash.
+    const provingProvider = config.provingServiceUrl
+      ? new ProvingServiceProofProvider(config.provingServiceUrl, CHAIN_ID)
+      : new CallMockProofProvider(this.provider as unknown as never, CHAIN_ID, {
+          validateSignature: false,
+        });
+
     this.privateTransfers = createPrivateTransfers({
       account,
       viewingKeyProvider: {
         // Reuse the deterministic [1, N/2] viewing-key derivation already in the worker.
-        getViewingKey: async () => {
-          const vk = await generateViewingKey(config.masterPrivateKey);
-          return vk.privateKey;
-        },
+        // Must return BigInt (not string) — SDK ViewKey range check expects bigint.
+        getViewingKey: async () => BigInt((await generateViewingKey(config.masterPrivateKey)).privateKey),
       },
-      provingProvider: new CallMockProofProvider(this.provider, CHAIN_ID, {
-        validateSignature: false,
-      }),
+      provingProvider,
       discoveryProvider: new ContractDiscoveryProvider(this.poolContract as never),
       poolContractAddress: POOL_CONTRACT_ADDRESS,
     });
@@ -158,6 +184,31 @@ export class VaultService {
       .execute();
     return this.toResult(result);
   }
+
+  /**
+   * Discover notes for the master account (incoming private transfers).
+   * Used by /verify-private-transfer to attribute payments by sender channel.
+   */
+  async discoverNotes(params?: { blockIdentifier?: unknown }) {
+    return this.privateTransfers.discoverNotes(params as never);
+  }
+
+  /**
+   * Discover channels for given recipients (sender attribution).
+   */
+  async discoverChannels(recipients: unknown, params?: unknown) {
+    return this.privateTransfers.discoverChannels(recipients as never, params as never);
+  }
+
+  /** Whether a real proving service is configured (vs mock fallback). */
+  isMockProver(): boolean {
+    return !this.config.provingServiceUrl;
+  }
+
+  /** Expose raw privateTransfers for advanced callers (e.g. verify-private-transfer). */
+  get rawTransfers() {
+    return this.privateTransfers;
+  }
 }
 
 // ============ Factory ============
@@ -166,10 +217,12 @@ export function createVaultService(env: {
   STARKNET_RPC_URL: string;
   MASTER_ADDRESS: string;
   MASTER_PRIVATE_KEY: string;
+  PROVING_SERVICE_URL?: string;
 }): VaultService {
   return new VaultService({
     rpcUrl: env.STARKNET_RPC_URL,
     masterAddress: env.MASTER_ADDRESS,
     masterPrivateKey: env.MASTER_PRIVATE_KEY,
+    provingServiceUrl: env.PROVING_SERVICE_URL,
   });
 }

@@ -54,13 +54,21 @@ Klome="asdf" - [[00],023
 
 @AgentTemplateDeveloperBlockchainSpecialist
 @AgentTemplateDeveloperBlockchainSpecialistStarknet
+@AgentTemplateDevOps
+@AgentTemplateProjectManager
+@AgentTemplateTeachLead
 @AgentTemplateDeveloper
-@AgentTemplateDeveloper
+@AgentTemplateSeller
+@AgentTemplateContentCreator
+@AgentTemplateGrowth
+@AgentTemplate
 
+---
 
-
-
-
+@AgentTemplateAssigner_()=
+@AgentTemplateAssigner_()=
+@AgentTemplateAssigner_()=
+@AgentTemplateAssigner_()=
 
 
 

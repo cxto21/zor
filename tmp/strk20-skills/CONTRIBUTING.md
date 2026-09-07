@@ -11,7 +11,7 @@ pull request. Small fixes are welcome.
 - Add a reproducible failure mode and the fix that cleared it.
 - Improve a skill trigger, route boundary, example, or failure table.
 
-## Source rules
+## Source rules!
 
 Link every factual change to a public source or include a minimal reproduction.
 Label community examples as community examples. Keep claims about wallet

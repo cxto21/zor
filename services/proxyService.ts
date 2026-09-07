@@ -1,4 +1,4 @@
-// STRK20 Proxy Service
+// STRK20 Proxy Service!
 // Communication layer between the frontend and the Cloudflare Worker proxy
 
 const WORKER_URL = import.meta.env.VITE_PROXY_WORKER_URL || 'http://localhost:8787';
@@ -9,6 +9,12 @@ const STRK20_CONTRACT = '0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab0720185
 
 // Privacy Pool (Sepolia v2.0)
 const PRIVACY_POOL_ADDRESS = '0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91';
+const MASTER_ADDRESS = '0x12f8b399a2eff402e22ea47be559d7e369cb5a18bcb426834a079947018a2d';
+const MASTER_ADDRESS_NEW = '0x79a12829bd0b99e0d78264892eb0b6724fd7409e54116418a5dfa4d72066878';
+
+// Prover requirement: real VIRTUAL_SNOS proof needs PROVING_SERVICE_URL
+// (ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2 on Fly/Railway)
+// with 10-block maturity (provingBlockId = head-10).
 
 /**
  * Get a unique deposit address for this user.
@@ -175,13 +181,71 @@ export async function verifyDeposit(
 
 /**
  * Check if a wallet supports STRK20 privacy pool operations.
+ * Checks both starknet.js Account API and wallet standard features.
  */
 export function hasStrk20Support(account: any): boolean {
-  return (
-    account &&
-    typeof account === 'object' &&
-    typeof account.strk20InvokeTransaction === 'function'
-  );
+  if (!account || typeof account !== 'object') return false;
+  if (typeof account.strk20InvokeTransaction === 'function') return true;
+  // Wallet standard feature detection (Ready wallet)
+  if (account.features?.['starknet:walletApi']) return true;
+  // Fallback: try wallet.request capability
+  if (typeof account.request === 'function') return true;
+  return false;
+}
+
+/**
+ * Register master viewing key in pool (single master-receiver model).
+ * Master 0x12f8... will be registered once; users private-transfer to MASTER_ADDRESS.
+ */
+export async function registerMaster(): Promise<{
+  success: boolean;
+  txHash?: string | null;
+  alreadyRegistered?: boolean;
+  mock?: boolean;
+  error?: string;
+}> {
+  try {
+    const response = await fetch(`${WORKER_URL}/register-master`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    return await response.json();
+  } catch (error) {
+    return { success: false, error: `Network error: ${error}` };
+  }
+}
+
+/**
+ * Verify private transfer from walletAddress to MASTER_ADDRESS via discoverNotes.
+ * Uses master viewing key discovery; requires PROVING_SERVICE_URL for real VIRTUAL_SNOS.
+ */
+export async function verifyPrivateTransfer(
+  walletAddress: string,
+  minutes?: number,
+  expectedAmountWei?: string,
+): Promise<{
+  success: boolean;
+  paid?: boolean;
+  amount?: string;
+  requiredWei?: string;
+  txHash?: string;
+  mock?: boolean;
+  token?: string;
+  balance?: string;
+  minutesAvailable?: number;
+  error?: string;
+}> {
+  try {
+    const response = await fetch(`${WORKER_URL}/verify-private-transfer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ walletAddress, minutes, expectedAmountWei }),
+    });
+    return await response.json();
+  } catch (error) {
+    return { success: false, error: `Network error: ${error}` };
+  }
 }
 
 export {
@@ -189,4 +253,6 @@ export {
   PRICE_PER_MINUTE,
   STRK20_CONTRACT,
   PRIVACY_POOL_ADDRESS,
+  MASTER_ADDRESS,
+  MASTER_ADDRESS_NEW,
 };

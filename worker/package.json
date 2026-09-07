@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@scure/starknet": "^2.4.0",
+    "@starkware-libs/starknet-privacy-sdk": "file:../../../tmp/opencode/starknet-privacy/sdk",
     "starknet": "^10.7.1",
     "stealth-fetch": "^0.2.2"
   }
