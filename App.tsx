@@ -274,31 +274,20 @@ const App: React.FC = () => {
         }
       }
 
-      // Fallback: standard ERC20 transfer to depositAddress (keep for backward compat)
-      // Only if private didn't succeed or not supported
-      if (!privateSucceeded) {
-        const amountLow = finalAmountWei & BigInt('0xffffffffffffffffffffffffffffffff');
-        const amountHigh = finalAmountWei >> BigInt(128);
-        const paddedAddress = depositAddress.toLowerCase().replace('0x', '').padStart(64, '0');
-        let result: any = null;
-        try {
-          result = await account.execute(
-            { contractAddress: STRK20_CONTRACT, entrypoint: 'transfer',
-              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)] },
-            { version: 0x3, resourceBounds: {
-              l1_gas: { max_amount: '0x1000', max_price_per_unit: '0x2386f26fc10000' },
-              l2_gas: { max_amount: '0x100000', max_price_per_unit: '0x2386f26fc10000' },
-              l1_data_gas: { max_amount: '0x200', max_price_per_unit: '0x2386f26fc10000' },
-            }}
-          );
-        } catch {
-          result = await account.execute(
-            { contractAddress: STRK20_CONTRACT, entrypoint: 'transfer',
-              calldata: ['0x' + paddedAddress, '0x' + amountLow.toString(16), '0x' + amountHigh.toString(16)] },
-            { version: 0x1, maxFee: '0x1600000' }
-          );
-        }
-        txHash = result?.transaction_hash || null;
+      // Fallback: Only offer plain transfer if private was attempted but failed.
+      // Do NOT auto-fall to plain if private was never attempted (wallet lacks STRK20 support).
+      // User should explicitly choose plain transfer instead of it being automatic.
+      if (!privateSucceeded && privateAttempted) {
+        // Private was attempted but failed — show error, do NOT auto-fall to plain transfer
+        // to avoid users accidentally sending plain STRK when they intended shielded payment.
+        setStatus('Private transfer failed — if you intended plain STRK transfer, please try again with a wallet that supports STRK20 shielding, or try the public fallback manually.');
+        txHash = null;
+      } else if (!privateSucceeded && !privateAttempted) {
+        // Private was never attempted (wallet lacks STRK20 support).
+        // Show informational message and allow user to choose: plain transfer or cancel.
+        setStatus('Shielded STRK20 payment not supported by this wallet. Would you like to send plain STRK to depositAddress instead?');
+        // We do NOT execute a plain transfer automatically — let user decide via UI action.
+        txHash = null;
       }
 
       if (txHash && !privateSucceeded) {
