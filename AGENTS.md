@@ -9,7 +9,7 @@
 
 ---
 
-## Estado del Proyecto (2026-09-01)
+## Estado del Proyecto (2026-09-07)
 
 ### Lo que funciona
 - ✅ Worker proxy con stealth-fetch (raw TCP sockets)
@@ -56,13 +56,13 @@
 
 ### Gaps Menores (mejorable)
 
-7. **No hay top-up desde el browser** — Una vez que el balance se agota, el usuario tiene que volver al home y empezar el flow de pago de nuevo.
+8. **No hay top-up desde el browser** — Una vez que el balance se agota, el usuario tiene que volver al home y empezar el flow de pago de nuevo. *(Duplicado de gap crítico #4 — priorizado abajo)*
 
-8. **No hay feedback visual de loading en el iframe** — El loading bar es estimado, no real.
+9. **No hay feedback visual de loading en el iframe** — El loading bar es estimado, no real.
 
-9. **No hay 404/error handling en el proxy** — Si el target site responde con error, el proxy lo pasa sin modifier.
+10. **No hay 404/error handling en el proxy** — Si el target site responde con error, el proxy lo pasa sin modifier.
 
-10. **No hay cache** — Cada request va al target sin caching, lento para páginas estáticas.
+11. **No hay cache** — Cada request va al target sin caching, lento para páginas estáticas.
 
 ---
 
@@ -78,16 +78,18 @@
 | 2026-09-01 | Master-account V3 tx: resource bounds BigInt + padding consistente | Fix de "Invalid Tx version" / "Account validation failed" en /shield y /fund-account |
 | 2026-09-01 | Pool shield requiere prover oficial (Virtual SNOS) o devnet con mock prover | `compile_actions` NO es el entrypoint de liquidación; `apply_actions` + proof_facts lo es |
 | 2026-09-01 | Vault SDK integration (Option B) — official SDK path against live Sepolia | `CallMockProofProvider` with `validateSignature:false` works on Alchemy; produces correct `CallAndProof` for `apply_actions` |
+| 2026-09-07 | Eliminado wally vendoreado (22 archivos) | Recorder CDP ya no necesario; se mantiene playwright por docs/freestyle-browser-vm; push a main sin .env sensibles |
 
 ---
 
 ## Próximos Pasos (para que el PO priorice)
 
-1. **STRK20 Pool shield server-side (ACTIVO)** — Decidir el approach del prover:
+1. **Top-up flow** — Permitir agregar más tiempo sin reiniciar sesión (actual gap #4, mayor fricción UX).
+2. **Rate limiting** — Básico: max X requests/min por token (abuso prevention).
+3. **STRK20 Pool shield server-side** — Decidir el approach del prover:
    - (a) Integrar el SDK prover oficial de starknet-privacy (Virtual SNOS + proofs reales, `apply_actions`), o
    - (b) Levantar un devnet local con mock prover para el flujo completo shield/unshield, o
-   - (c) Simplificar: desplegar un pool de prueba view-only donde `compile_actions` sea view pura (valida el flujo deposito/retiro end-to-end sin el proving completo).
-2. **Per-user account deployment** — Verificar flujo completo.
-3. **Top-up flow** — Permitir agregar más tiempo sin reiniciar sesión.
-4. **Rate limiting** — Básico: max X requests/min por token.
+   - (c) Simplificar: desplegar un pool de prueba view-only donde `compile_actions` sea view pura.
+4. **Per-user account deployment** — Verificar flujo completo e2e.
 5. **Testing end-to-end** — Probar el flow completo en el frontend.
+6. **Logging / observabilidad** — Trackear usage, errores y patterns de abuso (gap #6).
