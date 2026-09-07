@@ -28,7 +28,7 @@ const SESSION_URL_KEY = 'zor_session_url';
 // Debug master — new Argent 0.4.0 account (Ready-compatible)
 // Env override: VITE_MASTER_ADDRESS_NEW (vite) or hardcode fallback
 const DEBUG_MASTER_FALLBACK = MASTER_ADDRESS_NEW;
-const SEPOLIA_RPC_FALLBACK = 'https://starknet-sepolia.public.blastapi.io/rpc/v0_7';
+const MAINNET_RPC_FALLBACK = 'https://starknet-mainnet.public.blastapi.io/rpc/v0_7';
 const DEBUG_AMOUNT_DECIMAL = '1000000000000'; // 0.000001 STRK (1e12 wei)
 
 const App: React.FC = () => {
@@ -466,7 +466,7 @@ const App: React.FC = () => {
     // Poll get_public_key
     const connectedAddr: string = account.address || account.selectedAddress || '';
     const workerUrl = (import.meta as any).env?.VITE_PROXY_WORKER_URL || '';
-    const rpcUrl = (import.meta as any).env?.VITE_STARKNET_RPC_URL || SEPOLIA_RPC_FALLBACK;
+    const rpcUrl = (import.meta as any).env?.VITE_STARKNET_RPC_URL || MAINNET_RPC_FALLBACK;
     const masterAddrToCheck = connectedAddr;
     const pollGetPublicKey = async (): Promise<{ registered: boolean; raw?: string }> => {
       // Try via RpcProvider.callContract (handles selector hashing)
@@ -638,7 +638,7 @@ const App: React.FC = () => {
             {debugTxHash && (
               <div className="space-y-1">
                 <div className="font-mono text-[10px] break-all bg-white p-1.5 border"><span className="font-bold">tx:</span> {debugTxHash}</div>
-                <a href={`https://sepolia.voyager.online/tx/${debugTxHash}`} target="_blank" rel="noreferrer" className="text-[10px] text-blue-700 underline break-all">Voyager: sepolia.voyager.online/tx/{debugTxHash.slice(0, 16)}...</a>
+                <a href={`https://voyager.online/tx/${debugTxHash}`} target="_blank" rel="noreferrer" className="text-[10px] text-blue-700 underline break-all">Voyager: voyager.online/tx/{debugTxHash.slice(0, 16)}...</a>
                 {debugRegistered === true && <p className="text-[10px] text-green-700 font-bold">✓ get_public_key confirms registered</p>}
                 {debugRegistered === false && <p className="text-[10px] text-yellow-700">Not yet registered — retry poll.</p>}
               </div>
@@ -785,12 +785,12 @@ const App: React.FC = () => {
                       <span className="font-bold">tx:</span> {debugTxHash}
                     </div>
                     <a
-                      href={`https://sepolia.voyager.online/tx/${debugTxHash}`}
+                      href={`https://voyager.online/tx/${debugTxHash}`}
                       target="_blank"
                       rel="noreferrer"
                       className="text-[10px] text-blue-700 underline break-all"
                     >
-                      Voyager: sepolia.voyager.online/tx/{debugTxHash.slice(0, 16)}...
+                      Voyager: voyager.online/tx/{debugTxHash.slice(0, 16)}...
                     </a>
                     {debugRegistered === true && <p className="text-[10px] text-green-700 font-bold">✓ get_public_key confirms registered</p>}
                     {debugRegistered === false && <p className="text-[10px] text-yellow-700">Not yet registered — tx may need ~30s + 10-block maturity. Poll again.</p>}
@@ -878,7 +878,7 @@ const App: React.FC = () => {
         <span className="text-[8px] font-mono text-gray-600">
           {hasActiveSession ? `✅ ACTIVE — ${sessionBalance || '0'} STRK — ${timeRemaining}` : '💤 No session'}
         </span>
-        <span className="text-[8px] font-mono text-gray-600">ZOR v0.2 • STRK20 • STARKNET SEPOLIA</span>
+        <span className="text-[8px] font-mono text-gray-600">ZOR v0.2 • STRK20 • STARKNET MAINNET</span>
       </div>
     </div>
   );

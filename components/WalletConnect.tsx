@@ -4,9 +4,9 @@ import { connect, disconnect } from "starknetkit";
 import { WalletAccountV6, RpcProvider } from "starknet";
 import { createStore } from "@starknet-io/get-starknet-discovery";
 
-const SN_SEPOLIA_CHAIN_ID = BigInt("0x534e5f5345504f4c4941");
+const SN_MAIN_CHAIN_ID = BigInt("0x534e5f4d41494e");
 const STORAGE_KEY_ADDRESS = "zor_wallet_address";
-const SEPOLIA_RPC = "https://starknet-sepolia.public.blastapi.io/rpc/v0_7";
+const MAINNET_RPC = "https://starknet-mainnet.public.blastapi.io/rpc/v0_7";
 
 interface WalletConnectProps {
   onAccountChange: (account: any) => void;
@@ -105,7 +105,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
   const [strk20Ready, setStrk20Ready] = useState(false);
 
   const checkNetwork = useCallback((chainId: bigint | undefined) => {
-    setWrongNetwork(chainId !== undefined && chainId !== SN_SEPOLIA_CHAIN_ID);
+    setWrongNetwork(chainId !== undefined && chainId !== SN_MAIN_CHAIN_ID);
   }, []);
 
   const initAccount = useCallback((account: any, addr: string, chainId?: bigint) => {
@@ -120,7 +120,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
    * Create WalletAccountV6 with STRK20 support using discovered wallet.
    */
   async function createStrk20Account(walletProvider: any): Promise<any> {
-    const provider = new RpcProvider({ nodeUrl: SEPOLIA_RPC });
+    const provider = new RpcProvider({ nodeUrl: MAINNET_RPC });
     try {
       console.log('[ZOR] WalletAccountV6.connect with discovered wallet:', walletProvider.name);
       const account = await WalletAccountV6.connect(provider, walletProvider);
@@ -249,7 +249,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
           let account: any = null;
           if (connector && typeof connector.account === "function") {
             try {
-              account = await connector.account({ nodeUrl: SEPOLIA_RPC });
+              account = await connector.account({ nodeUrl: MAINNET_RPC });
             } catch {}
           }
           if (account) {
@@ -293,7 +293,7 @@ const WalletConnect: React.FC<WalletConnectProps> = ({ onAccountChange }) => {
         const connector = result?.connector;
         if (connector && typeof connector.account === "function") {
           try {
-            account = await connector.account({ nodeUrl: SEPOLIA_RPC });
+            account = await connector.account({ nodeUrl: MAINNET_RPC });
           } catch {}
         }
       }

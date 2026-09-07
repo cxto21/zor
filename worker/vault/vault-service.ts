@@ -52,12 +52,16 @@ import type { StarkscanKvNamespace } from "./starkscan-persistence";
 
 // ============ Constants ============
 
-const POOL_CONTRACT_ADDRESS =
+const DEFAULT_POOL_CONTRACT_ADDRESS =
   "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
-const STRK_TOKEN_ADDRESS =
+const DEFAULT_STRK_TOKEN_ADDRESS =
   "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
-const CHAIN_ID = constants.StarknetChainId.SN_SEPOLIA;
+// Default to mainnet; override via env CHAIN_ID if needed.
+const CHAIN_ID = constants.StarknetChainId.SN_MAIN;
 const CHAIN_ID_MAIN = constants.StarknetChainId.SN_MAIN;
+// Backwards-compat aliases for external imports
+const POOL_CONTRACT_ADDRESS = DEFAULT_POOL_CONTRACT_ADDRESS;
+const STRK_TOKEN_ADDRESS = DEFAULT_STRK_TOKEN_ADDRESS;
 
 function isMainnetChainId(chainId: string): boolean {
   return chainId === CHAIN_ID_MAIN;
@@ -82,6 +86,8 @@ export class VaultService {
   private provider: RpcProvider;
   private poolContract: Contract;
   private privateTransfers: ReturnType<typeof createPrivateTransfers>;
+  private poolAddress: string;
+  private strkAddress: string;
 
   constructor(
     private config: {
@@ -94,8 +100,12 @@ export class VaultService {
       kv?: StarkscanKvNamespace;
       chainId?: string;
       starkscanBaseUrl?: string;
+      poolContractAddress?: string;
+      strkTokenAddress?: string;
     },
   ) {
+    this.poolAddress = config.poolContractAddress ?? DEFAULT_POOL_CONTRACT_ADDRESS;
+    this.strkAddress = config.strkTokenAddress ?? DEFAULT_STRK_TOKEN_ADDRESS;
     this.provider = new RpcProvider({ nodeUrl: config.rpcUrl });
 
     // A real starknet.js Account is the `PrivateTransfersUser` the SDK expects:
@@ -112,7 +122,7 @@ export class VaultService {
     // for prod (requires indexer URL, not yet deployed) but not exported in this env.
     this.poolContract = new Contract({
       abi: PrivacyPoolABI,
-      address: POOL_CONTRACT_ADDRESS,
+      address: this.poolAddress,
       providerOrAccount: this.provider,
     }).typedv2(PrivacyPoolABI);
 
@@ -147,7 +157,7 @@ export class VaultService {
       },
       provingProvider,
       discoveryProvider: new ContractDiscoveryProvider(this.poolContract as never),
-      poolContractAddress: POOL_CONTRACT_ADDRESS,
+      poolContractAddress: this.poolAddress,
     });
   }
 
@@ -188,7 +198,7 @@ export class VaultService {
   async shield(amount: bigint): Promise<VaultExecuteResult> {
     const result = await this.privateTransfers
       .build(this.defaultOptions)
-      .with(STRK_TOKEN_ADDRESS)
+      .with(this.strkAddress)
       .deposit({ amount })
       .done()
       .execute();
@@ -203,7 +213,7 @@ export class VaultService {
   async unshield(amount: bigint, recipient: string): Promise<VaultExecuteResult> {
     const result = await this.privateTransfers
       .build(this.defaultOptions)
-      .with(STRK_TOKEN_ADDRESS)
+      .with(this.strkAddress)
       .withdraw({ recipient, amount })
       .done()
       .execute();
@@ -255,6 +265,8 @@ export function createVaultService(env: {
   SESSIONS?: StarkscanKvNamespace;
   PROOF_JOBS?: StarkscanKvNamespace;
   STARKSCAN_BASE_URL?: string;
+  POOL_CONTRACT_ADDRESS?: string;
+  STRK_TOKEN_ADDRESS?: string;
 }): VaultService {
   const kv = (env.PROOF_JOBS ?? env.SESSIONS) as StarkscanKvNamespace | undefined;
   return new VaultService({
@@ -267,6 +279,8 @@ export function createVaultService(env: {
     kv,
     chainId: env.CHAIN_ID,
     starkscanBaseUrl: env.STARKSCAN_BASE_URL,
+    poolContractAddress: (env as any).POOL_CONTRACT_ADDRESS ?? DEFAULT_POOL_CONTRACT_ADDRESS,
+    strkTokenAddress: (env as any).STRK_TOKEN_ADDRESS ?? DEFAULT_STRK_TOKEN_ADDRESS,
   });
 }
 

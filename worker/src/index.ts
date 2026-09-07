@@ -38,6 +38,13 @@ interface Env {
   MASTER_ACCOUNT_CLASS_HASH: string;
   PROVING_SERVICE_URL?: string;
   FREESTYLE_API_KEY?: string;
+  CHAIN_ID?: string;
+  STARKSCAN_API_KEY?: string;
+  STARKSCAN_DAILY_BUDGET?: string;
+  STARKSCAN_BASE_URL?: string;
+  PROOF_JOBS?: KVNamespace;
+  POOL_CONTRACT_ADDRESS?: string;
+  STRK_TOKEN_ADDRESS?: string;
 }
 
 interface SessionData {
@@ -943,7 +950,7 @@ async function handleFundAccount(
       calldata,
       nonce,
       maxFee: "0x100000000000000",
-      chainId: "0x534e5f5345504f4c4941", // Sepolia
+      chainId: (env as any).CHAIN_ID ?? "0x534e5f4d41494e", // SN_MAIN
     });
 
     // Broadcast
@@ -1331,6 +1338,7 @@ async function handleShield(request: Request, env: Env): Promise<Response> {
       STARKNET_RPC_URL: env.STARKNET_RPC_URL,
       MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
       MASTER_ADDRESS: env.MASTER_ADDRESS,
+      CHAIN_ID: (env as any).CHAIN_ID,
     });
     
     // Execute shield
@@ -1365,6 +1373,7 @@ async function handleShieldStatus(env: Env): Promise<Response> {
       STARKNET_RPC_URL: env.STARKNET_RPC_URL,
       MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
       MASTER_ADDRESS: env.MASTER_ADDRESS,
+      CHAIN_ID: (env as any).CHAIN_ID,
     });
     
     const status = await shieldService.getStatus();
@@ -1417,6 +1426,14 @@ async function handleRegisterMaster(request: Request, env: Env): Promise<Respons
       MASTER_ADDRESS: env.MASTER_ADDRESS,
       MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
       PROVING_SERVICE_URL: effectiveProverUrl,
+      CHAIN_ID: (env as any).CHAIN_ID,
+      STARKSCAN_API_KEY: (env as any).STARKSCAN_API_KEY,
+      STARKSCAN_DAILY_BUDGET: (env as any).STARKSCAN_DAILY_BUDGET,
+      STARKSCAN_BASE_URL: (env as any).STARKSCAN_BASE_URL,
+      SESSIONS: env.SESSIONS as any,
+      PROOF_JOBS: (env as any).PROOF_JOBS,
+      POOL_CONTRACT_ADDRESS: (env as any).POOL_CONTRACT_ADDRESS,
+      STRK_TOKEN_ADDRESS: (env as any).STRK_TOKEN_ADDRESS,
     });
 
     // If prover not configured, we can still build a mock CallAndProof for local dev
@@ -1499,6 +1516,14 @@ async function handleVerifyPrivateTransfer(request: Request, env: Env): Promise<
       MASTER_ADDRESS: env.MASTER_ADDRESS,
       MASTER_PRIVATE_KEY: env.MASTER_PRIVATE_KEY,
       PROVING_SERVICE_URL: effectiveProverUrl,
+      CHAIN_ID: (env as any).CHAIN_ID,
+      STARKSCAN_API_KEY: (env as any).STARKSCAN_API_KEY,
+      STARKSCAN_DAILY_BUDGET: (env as any).STARKSCAN_DAILY_BUDGET,
+      STARKSCAN_BASE_URL: (env as any).STARKSCAN_BASE_URL,
+      SESSIONS: env.SESSIONS as any,
+      PROOF_JOBS: (env as any).PROOF_JOBS,
+      POOL_CONTRACT_ADDRESS: (env as any).POOL_CONTRACT_ADDRESS,
+      STRK_TOKEN_ADDRESS: (env as any).STRK_TOKEN_ADDRESS,
     });
 
     // Mock fallback: if still no prover, return mock response and log

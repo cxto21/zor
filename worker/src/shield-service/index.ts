@@ -34,10 +34,13 @@ import { buildInvokeTx, hexToBigInt, bigIntToHex, padHex } from "../starknet-dep
 
 // ============ Constants ============
 
-const POOL_CONTRACT_ADDRESS = "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
-const STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
+const DEFAULT_POOL_CONTRACT_ADDRESS = "0x0254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91";
+const DEFAULT_STRK_TOKEN_ADDRESS = "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
 const PAYMASTER_ADDRESS = "0x7654d9c48bbb08aba2c9dca4fc86f1fcfc59491b29bcea1fba8f1b7c6b56d90";
-const CHAIN_ID = "0x534e5f5345504f4c4941"; // SN_SEPOLIA
+const CHAIN_ID = "0x534e5f4d41494e"; // SN_MAIN
+// Backwards-compat aliases
+const POOL_CONTRACT_ADDRESS = DEFAULT_POOL_CONTRACT_ADDRESS;
+const STRK_TOKEN_ADDRESS = DEFAULT_STRK_TOKEN_ADDRESS;
 
 // ============ Raw RPC Helpers ============
 
@@ -350,15 +353,18 @@ export function createShieldService(env: {
   STARKNET_RPC_URL: string;
   MASTER_PRIVATE_KEY: string;
   MASTER_ADDRESS: string;
+  CHAIN_ID?: string;
+  POOL_CONTRACT_ADDRESS?: string;
+  STRK_TOKEN_ADDRESS?: string;
 }): ShieldService {
   return new ShieldService({
-    poolAddress: POOL_CONTRACT_ADDRESS,
-    strkTokenAddress: STRK_TOKEN_ADDRESS,
+    poolAddress: (env as any).POOL_CONTRACT_ADDRESS ?? DEFAULT_POOL_CONTRACT_ADDRESS,
+    strkTokenAddress: (env as any).STRK_TOKEN_ADDRESS ?? DEFAULT_STRK_TOKEN_ADDRESS,
     paymasterAddress: PAYMASTER_ADDRESS,
     rpcUrl: env.STARKNET_RPC_URL,
     masterPrivateKey: env.MASTER_PRIVATE_KEY,
     masterAddress: env.MASTER_ADDRESS,
-    chainId: CHAIN_ID,
+    chainId: env.CHAIN_ID ?? CHAIN_ID,
   });
 }
 
