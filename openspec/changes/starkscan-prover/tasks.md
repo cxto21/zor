@@ -46,11 +46,11 @@ Chain strategy: pending
 
 ## Phase 4: Testing
 
-- [ ] 4.1 Unit classifier/attestation/limiter. AC: full branch cover. Deps: 2.2,2.4,2.5. Size: S. Files: `*.test.ts`. Verify: `vitest --coverage`
-- [ ] 4.2 Unit polling+maxAttempts+persist. AC: spec scenarios pass. Deps: 2.3,1.2. Size: S. Files: `starkscan-proof-provider.test.ts`. Verify: fake timers
-- [ ] 4.3 Integration factory priority+gate. AC: all selection scenarios. Deps: 3.1. Size: S. Files: `vault-service.test.ts`. Verify: `vitest vault-service.test.ts`
+- [x] 4.1 Unit classifier/attestation/limiter. AC: full branch cover. Deps: 2.2,2.4,2.5. Size: S. Files: `*.test.ts`. Verify: `npx tsx worker/vault/starkscan-proof-provider.test.ts` (5 suites)
+- [x] 4.2 Unit polling+maxAttempts+persist. AC: spec scenarios pass. Deps: 2.3,1.2. Size: S. Files: `starkscan-proof-provider.test.ts`. Verify: `npx tsx worker/vault/starkscan-proof-provider.test.ts` — cap30s/maxAttempts/once-only
+- [x] 4.3 Integration factory priority+gate. AC: all selection scenarios. Deps: 3.1. Size: S. Files: `vault-service.test.ts`. Verify: `npx tsx worker/vault/starkscan-proof-provider.test.ts` — 6 scenarios via select() mirror
 
 ## Phase 5: Docs
 
-- [ ] 5.1 Docs AGENTS.md+JSDoc mainnet-only scope. AC: rollback clear secret. Deps: 3.1. Size: XS. Files: `AGENTS.md`,`wrangler.toml`. Verify: review
-- [ ] 5.2 Audit no log `STARKSCAN_API_KEY`. AC: only Env reads. Deps: 2.1. Size: XS. Files: `starkscan-proof-provider.ts`. Verify: `grep worker/`
+- [x] 5.1 Docs AGENTS.md+JSDoc mainnet-only scope. AC: rollback clear secret. Deps: 3.1. Size: XS. Files: `AGENTS.md`,`wrangler.toml`. Verify: AGENTS.md gap 2 updated + StarkscanProofProvider class JSDoc mainnet-only+secret
+- [x] 5.2 Audit no log `STARKSCAN_API_KEY`. AC: only Env reads. Deps: 2.1. Size: XS. Files: `starkscan-proof-provider.ts`. Verify: `grep -rn STARKSCAN_API_KEY worker/ | grep console` → 0

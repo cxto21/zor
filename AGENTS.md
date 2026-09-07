@@ -1,6 +1,6 @@
-# AGENTS.md — Zor Privacy Network
+# AGENTS.md — Zor Privacy Network!!
 
-## Equipo Humano-Agente
+## Equipo Humano-Agente -
 
 - **Product Owner (Humano):** El dueño del producto. Define qué se construye, prioriza, y decide el rumbo.
 - **Full Stack Developer (Agente):** Implementa, audita, y propone mejoras técnicas. Ejecuta lo que el PO aprueba.
@@ -39,10 +39,11 @@
 
 1. **✅ RESUELTO: Navegación inside iframe** — Click interceptor inyectado en el injector. Intercepta clicks en `<a href>` y `<form action>`, reescribe URLs a proxy, y navega el iframe a través del proxy. Server-side rewriting + click interceptor = cobertura completa.
 
-2. **✅ SDK INTEGRATION: STRK20 Privacy Pool vault service (Opción B)** — El bloqueo anterior era `compile_actions` via `starknet_call` (rompe `NO_REPLAY_PROTECTION`). **RESUELTO** con el SDK oficial: `worker/vault/vault-service.ts` usa `createPrivateTransfers` + `CallMockProofProvider(validateSignature:false)` que produce un `CallAndProof` para `apply_actions` (NO compile_actions). Verificado contra Sepolia Alchemy: `register()` → 32-element calldata; `shield()` → 56-element calldata (register + channel + subchannel + deposit + encrypted note + surplus); ambos con class_hash `0x7e2bbd...` correcto y 9 proof_facts VIRTUAL_SNOS. **Settlement pendiente**: `apply_actions` en el pool real de Sepolia necesita pruebas VIRTUAL_SNOS genuinas (el pool valida proof_facts contra el blockifier). Para settlement se necesita: (a) prover real (starknet-privacy prover / AVNU), o (b) devnet local con pool compilado (requiere más RAM/CPU que el sandbox actual).
-   - Files: `worker/vault/vault-service.ts`, `worker/vault/run-sepolia.ts`
+2. **✅ SDK INTEGRATION: STRK20 Privacy Pool vault service (Opción B)** — El bloqueo anterior era `compile_actions` via `starknet_call` (rompe `NO_REPLAY_PROTECTION`). **RESUELTO** con el SDK oficial: `worker/vault/vault-service.ts` usa `createPrivateTransfers` + `CallMockProofProvider(validateSignature:false)` que produce un `CallAndProof` para `apply_actions` (NO compile_actions). Verificado contra Sepolia Alchemy: `register()` → 32-element calldata; `shield()` → 56-element calldata (register + channel + subchannel + deposit + encrypted note + surplus); ambos con class_hash `0x7e2bbd...` correcto y 9 proof_facts VIRTUAL_SNOS. **Settlement mainnet desbloqueado via Starkscan**: `worker/vault/starkscan-proof-provider.ts` (`StarkscanProofProvider`) provee pruebas VIRTUAL_SNOS genuinas vía `POST /v1/SN_MAIN/prove` → poll `GET /prove/{jobId}` (mainnet-only, requiere scope `prove` del operador). Sin `STARKSCAN_API_KEY` el flujo cae a `PROVING_SERVICE_URL` (Sepolia self-hosted) o mock. Para settlement se necesita: (a) Starkscan en mainnet (desbloqueado), (b) prover real (starknet-privacy prover / AVNU) para Sepolia, o (c) devnet local con pool compilado.
+   - Files: `worker/vault/vault-service.ts`, `worker/vault/run-sepolia.ts`, `worker/vault/starkscan-proof-provider.ts`, `worker/vault/starkscan-persistence.ts`, `worker/vault/errors.ts`
    - SDK: `@starkware-libs/starknet-privacy-sdk@0.14.3-rc.6` (no npmjs, GitHub Packages only)
    - `CallMockProofProvider` with `validateSignature:false` uses plain `compile_actions` VIEW → works on Alchemy without `simulateTransaction`
+   - `StarkscanProofProvider` mainnet-only → `VaultService` factory `STARKSCAN_API_KEY` > `PROVING_SERVICE_URL` > mock; `STARKSCAN_API_KEY` como Worker secret, nunca logueado; TTL 24h + attestation `300-30-5=265s`
 
 3. **✅ RESUELTO: Per-user account deployment** — Worker deriva key única por usuario, calcula dirección OZ Account. Frontend usa starknet.js para deploy. Master account fondea la cuenta nueva via `/fund-account` endpoint.
 
@@ -79,8 +80,9 @@
 | 2026-09-01 | Pool shield requiere prover oficial (Virtual SNOS) o devnet con mock prover | `compile_actions` NO es el entrypoint de liquidación; `apply_actions` + proof_facts lo es |
 | 2026-09-01 | Vault SDK integration (Option B) — official SDK path against live Sepolia | `CallMockProofProvider` with `validateSignature:false` works on Alchemy; produces correct `CallAndProof` for `apply_actions` |
 | 2026-09-07 | Eliminado wally vendoreado (22 archivos) | Recorder CDP ya no necesario; se mantiene playwright por docs/freestyle-browser-vm; push a main sin .env sensibles |
+| 2026-09-07 | Starkscan prover mainnet (starkscan-prover) | `StarkscanProofProvider` mainnet-only async prover; factory `STARKSCAN_API_KEY` > `PROVING_SERVICE_URL` > mock; KV 24h TTL + attestation 265s; `STARKSCAN_API_KEY` como Worker secret nunca logueado; rollback borrando secret |
 
----
+---!!!!
 
 ## Próximos Pasos (para que el PO priorice)
 

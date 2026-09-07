@@ -52,6 +52,12 @@ function parseRetryAfter(res: Response, body?: PollJson): number | undefined {
 }
 function extractJobId(json: unknown): string | undefined { const j = json as Record<string, unknown>; return (j.jobId as string) ?? (j.job_id as string) ?? (j.id as string); }
 
+/**
+ * Mainnet-only Starkscan prover.
+ * - Endpoint: POST/GET https://api.starkscan.co/v1/SN_MAIN/prove (SN_MAIN only; Sepolia via mock/self-hosted).
+ * - Secret: STARKSCAN_API_KEY must be a Worker secret (wrangler secret put), never in [vars], never logged.
+ * - Rollback: clear the secret → VaultService falls back to PROVING_SERVICE_URL or mock.
+ */
 export class StarkscanProofProvider {
   private apiKey: string; private kv: StarkscanKvNamespace; private dailyBudget: number; private baseUrl: string; private maxAttempts: number; private fetchImpl: typeof fetch;
   constructor(opts: StarkscanProofProviderOptions) {
