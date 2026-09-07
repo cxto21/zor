@@ -23,9 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 worker/.master-account.env
+worker/.dev.vars
 worker/.tmp/
 worker/vault/node_modules/
 .env
+.env.new-master
 
 # Libretto
 .libretto/
