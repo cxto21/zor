@@ -32,11 +32,11 @@ Chain strategy: pending
 
 ## Phase 2: Core Adapter
 
-- [ ] 2.1 Provider POST `/v1/SN_MAIN/prove` headers+block. AC: 202 persists jobId; else classified. Deps: 1.1,1.2. Size: M. Files: `starkscan-proof-provider.ts`. Verify: mocked fetch
-- [ ] 2.2 Classifier 9 codes `24→re-pin` `55/61/1000/-32603→terminal` `prover_*→retry/wait`. AC: terminal no poll. Deps: 2.1. Size: S. Files: `starkscan-proof-provider.ts`. Verify: table-driven vitest
-- [ ] 2.3 Polling `GET /prove/{jobId}` pollAfterSeconds+cap30s+maxAttempts. AC: waits≥hint; maxAttempts throws. Deps: 2.1. Size: M. Files: `starkscan-proof-provider.ts`. Verify: fake timers
-- [ ] 2.4 Attestation `now<issued_at+300-30-5` → additionalData. AC: 260s valid, 270s reject. Deps: 2.3. Size: S. Files: `starkscan-proof-provider.ts`. Verify: vitest clock
-- [ ] 2.5 Rate limiter KV `hash+UTC-date`+Retry-After. AC: under inc; at cap defer; midnight reset. Deps: 1.2,2.1. Size: S. Files: `starkscan-proof-provider.ts`. Verify: vitest
+- [x] 2.1 Provider POST `/v1/SN_MAIN/prove` headers+block. AC: 202 persists jobId; else classified. Deps: 1.1,1.2. Size: M. Files: `starkscan-proof-provider.ts`. Verify: mocked fetch
+- [x] 2.2 Classifier 9 codes `24→re-pin` `55/61/1000/-32603→terminal` `prover_*→retry/wait`. AC: terminal no poll. Deps: 2.1. Size: S. Files: `starkscan-proof-provider.ts`. Verify: table-driven vitest
+- [x] 2.3 Polling `GET /prove/{jobId}` pollAfterSeconds+cap30s+maxAttempts. AC: waits≥hint; maxAttempts throws. Deps: 2.1. Size: M. Files: `starkscan-proof-provider.ts`. Verify: fake timers
+- [x] 2.4 Attestation `now<issued_at+300-30-5` → additionalData. AC: 260s valid, 270s reject. Deps: 2.3. Size: S. Files: `starkscan-proof-provider.ts`. Verify: vitest clock
+- [x] 2.5 Rate limiter KV `hash+UTC-date`+Retry-After. AC: under inc; at cap defer; midnight reset. Deps: 1.2,2.1. Size: S. Files: `starkscan-proof-provider.ts`. Verify: vitest
 
 ## Phase 3: Integration
 

@@ -60,3 +60,51 @@ export function isRetryableError(e: unknown): e is StarkscanRetryableError {
 export function isBudgetExhaustedError(e: unknown): e is BudgetExhaustedError {
   return e instanceof BudgetExhaustedError;
 }
+
+// ── Classifier ──────────────────────────────────────────────────────────
+
+/**
+ * Classify Starkscan error codes into retry/terminal/budget buckets.
+ *
+ * Codes:
+ *  24 → re-pin to older block (retryable)
+ *  55, 61, 1000, -32603 → terminal (fix input)
+ *  prover_unavailable, prover_queue_full → retryable (backoff)
+ *  prover_key_concurrency → retryable (wait in-flight)
+ *  prover_daily_budget_exhausted → BudgetExhausted (wait Retry-After / midnight)
+ *  prover_* unknown → retryable
+ */
+export function classifyStarkscanError(
+  code: string | number,
+  message?: string,
+  retryAfter?: number,
+): StarkscanTerminalError | StarkscanRetryableError | BudgetExhaustedError {
+  const normalized = String(code);
+  const msg = message ?? `Starkscan error ${code}`;
+
+  if (normalized === "prover_daily_budget_exhausted") {
+    return new BudgetExhaustedError(msg, code, retryAfter);
+  }
+  if (["55", "61", "1000", "-32603"].includes(normalized)) {
+    return new StarkscanTerminalError(msg, code, retryAfter);
+  }
+  if (normalized === "24") {
+    return new StarkscanRetryableError(
+      message ?? "Block not found — re-pin to older finalized block",
+      code,
+      retryAfter,
+    );
+  }
+  if (
+    normalized === "prover_unavailable" ||
+    normalized === "prover_queue_full" ||
+    normalized === "prover_key_concurrency"
+  ) {
+    return new StarkscanRetryableError(msg, code, retryAfter);
+  }
+  if (normalized.startsWith("prover_")) {
+    return new StarkscanRetryableError(msg, code, retryAfter);
+  }
+  // Unknown numeric codes default to terminal to avoid infinite retry
+  return new StarkscanTerminalError(msg, code, retryAfter);
+}
