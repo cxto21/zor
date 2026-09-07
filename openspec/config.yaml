@@ -1,0 +1,67 @@
+project: zor-privacy-network
+persistence: hybrid
+strict_tdd: false
+
+context: |
+  Anonymous web proxy on Starknet with STRK20 micropayments.
+  Frontend: React 19 + Vite 6 (TypeScript)
+  Worker: Cloudflare Workers + wrangler (TypeScript)
+  Vault: STRK20 Privacy Pool integration via official SDK
+  Contracts: Cairo/Scarb (paymaster)
+
+stack:
+  frontend:
+    - react@19.2.3
+    - vite@6.2.0
+    - typescript@5.8.2
+    - starknetkit@3.4.2
+    - starknet@10.7.1
+    - playwright@1.63.0 (docs/browser-vm only)
+  worker:
+    - cloudflare/workers-types@5.20260830.1
+    - wrangler@4.0.0
+    - typescript@5.8.2
+    - @starkware-libs/starknet-privacy-sdk@0.14.3-rc.6 (local)
+    - starknet@10.7.1
+    - stealth-fetch@0.2.2
+    - @scure/starknet@2.4.0
+  vault:
+    - typescript@7.0.2
+    - tsx@4.23.13
+    - starknet-devnet@0.8.2
+    - @starkware-libs/starknet-privacy-sdk@0.14.3-rc.6 (local)
+    - starknet@10.7.1
+  contracts:
+    - scarb/cairo (zor_paymaster)
+
+testing:
+  runner: none
+  layers:
+    unit: false
+    integration: false
+    e2e: false
+  coverage: false
+  quality:
+    linter: false
+    typechecker: false
+    formatter: false
+
+phase_rules:
+  proposal:
+    required: true
+    template: ".atl/templates/proposal.md"
+  spec:
+    required: true
+    template: ".atl/templates/spec.md"
+  design:
+    required: true
+    template: ".atl/templates/design.md"
+  tasks:
+    required: true
+    template: ".atl/templates/tasks.md"
+  apply:
+    required: true
+  verify:
+    required: true
+  archive:
+    required: true
