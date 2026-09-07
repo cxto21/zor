@@ -250,6 +250,25 @@ export class VaultService {
   get rawTransfers() {
     return this.privateTransfers;
   }
+
+  /** Top up session minutes */
+  async topUp(token: string, minutes: number): Promise<{ success: boolean; newTotalMinutes: number; message: string }> {
+    if (!env.SESSIONS) return { success: false, newTotalMinutes: 0, message: "Sessions KV not configured" };
+    if (!token || minutes <= 0) return { success: false, newTotalMinutes: 0, message: "Invalid token or minutes" };
+
+    const key = `${SESSION_PREFIX}${token}`;
+    const existing = await env.SESSIONS.get(key);
+    if (!existing) return { success: false, newTotalMinutes: 0, message: "Session not found" };
+
+    const session: SessionData = JSON.parse(existing);
+    session.totalMinutes = (session.totalMinutes || 0) + minutes;
+
+    const ttl = session.totalMinutes * 60 + 300;
+    await env.SESSIONS.put(key, JSON.stringify(session), { expirationTtl: ttl });
+
+    const minutesAvailable = session.totalMinutes;
+    return { success: true, newTotalMinutes: minutesAvailable, message: `+${minutes} minutes added. Total: ${minutesAvailable} min` };
+  }
 }
 
 // ============ Factory ============

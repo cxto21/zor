@@ -474,8 +474,11 @@ async function validateSession(
   const minutesRemaining = pricePerMinute > 0 ? balanceStrk / pricePerMinute : 0;
   const lowBalance = minutesRemaining < LOW_BALANCE_THRESHOLD_MINUTES && minutesRemaining > 0;
 
-  // If balance is zero, session is dead
-  if (minutesRemaining <= 0 && session.accumulatedCost > 0) {
+  // If balance is zero OR elapsed time exceeds total minutes, session is dead
+  const elapsedMinutes = Math.max(0, Math.floor((Date.now() - session.createdAt) / 60000));
+  const exceededTime = elapsedMinutes >= session.totalMinutes;
+
+  if (minutesRemaining <= 0 || exceededTime) {
     if (env.SESSIONS) {
       await env.SESSIONS.delete(`${SESSION_PREFIX}${token}`);
     } else {
@@ -1164,6 +1167,16 @@ async function handleActivate(
       return errorResponse(`Balance check failed: ${balanceResult.reason}`, 500);
     }
 
+    // Expected STRK amount for this session (price per minute * minutes)
+    const expectedWei = body.minutes > 0
+      ? BigInt(body.minutes) * BigInt(Math.floor(parseFloat(env.PRICE_PER_MINUTE || "0.001") * 1e18))
+      : BigInt(0);
+
+    // Validate that deposit address has enough STRK
+    if (balanceResult.balance && BigInt(balanceResult.balance) < expectedWei) {
+      return errorResponse(`Insufficient STRK deposit: expected ~${parseFloat(env.PRICE_PER_MINUTE || "0.001").toFixed(4)} STRK/min × ${body.minutes} min = ${expectedWei.toString()} wei, got ${balanceResult.balance}`, 400);
+    }
+
     // Create session with balance tracking
     const { token, depositAddress } = await createSession(
       env,
@@ -1526,18 +1539,6 @@ async function handleVerifyPrivateTransfer(request: Request, env: Env): Promise<
       STRK_TOKEN_ADDRESS: (env as any).STRK_TOKEN_ADDRESS,
     });
 
-    // Mock fallback: if still no prover, return mock response and log
-    if (vaultService.isMockProver()) {
-      console.warn("verify-private-transfer: PROVING_SERVICE_URL not configured, returning mock");
-      return jsonResponse({
-        success: true,
-        mock: true,
-        message: "Prover not configured — set PROVING_SERVICE_URL (e.g. https://zor-prover.fly.dev) or FREESTYLE_API_KEY for on-demand Freestyle prover. Returning mock=false paid check.",
-        paid: false,
-        amount: "0",
-      });
-    }
-
     // Determine required amount
     const pricePerMinute = parseFloat(env.PRICE_PER_MINUTE || "0.001");
     let requiredWei: bigint;
@@ -1644,6 +1645,41 @@ async function handleVerifyPrivateTransfer(request: Request, env: Env): Promise<
   }
 }
 
+// ============ Top-up Handler ============
+
+async function handleTopUp(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await request.json()) as { token: string; minutes: number };
+    if (!body.token || !body.minutes || body.minutes <= 0) {
+      return errorResponse("Missing or invalid: token and positive minutes required", 400);
+    }
+
+    // Simple rate limit: 1 top-up per token per 60 seconds via KV
+    const rateKey = `topup_rate:${body.token}`;
+    const now = Date.now();
+    const lastTopup = await env.SESSIONS.get(rateKey);
+    if (lastTopup && Date.now() - parseInt(lastTopup) < 60000) {
+      const remaining = 60 - Math.floor((Date.now() - parseInt(lastTopup)) / 1000);
+      return errorResponse(`Rate limited: try again in ${remaining} seconds`, 429);
+    }
+
+    const topupResult = await vaultService.topUp(body.token, body.minutes);
+    if (!topupResult.success) return errorResponse(topupResult.message, 404);
+
+    // Update rate limit TTL
+    await env.SESSIONS.put(rateKey, now.toString(), { expirationTtl: 3600 });
+
+    return jsonResponse({
+      success: true,
+      newTotalMinutes: topupResult.newTotalMinutes,
+      message: topupResult.message,
+    });
+  } catch (error: any) {
+    console.error("top-up error:", error);
+    return errorResponse(`Top-up failed: ${error.message}`, 500);
+  }
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -1679,6 +1715,10 @@ export default {
 
     if (path === "/activate" && request.method === "POST") {
       return handleActivate(request, env);
+    }
+
+    if (path === "/top-up" && request.method === "POST") {
+      return handleTopUp(request, env);
     }
 
     if (path === "/proxy" && request.method === "GET") {
