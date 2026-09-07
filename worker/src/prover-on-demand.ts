@@ -41,6 +41,7 @@ export interface ProverEnv {
   PROVING_SERVICE_URL?: string;
   FREESTYLE_API_KEY?: string;
   STARKNET_RPC_URL?: string;
+  STARKSCAN_API_KEY?: string;
 }
 
 type EnsureResult =
@@ -160,6 +161,12 @@ export async function ensureProverUrl(env: ProverEnv): Promise<EnsureResult> {
     const url = env.PROVING_SERVICE_URL.replace(/\/$/, "");
     if (await healthOk(url)) return { url, source: "env", mock: false };
     console.warn("[ensureProver] PROVING_SERVICE_URL health failed, trying Freestyle branch", url);
+  }
+
+  // Starkscan-first: when STARKSCAN_API_KEY is set, VaultService selects StarkscanProofProvider
+  // (mainnet) and no Freestyle VM is needed. Short-circuit before any VM work.
+  if (env.STARKSCAN_API_KEY?.trim()) {
+    return { url: null, source: "mock", mock: true, reason: "STARKSCAN_API_KEY set — StarkscanProofProvider active, Freestyle branch skipped" };
   }
 
   // Memory cache — avoids spamming Freestyle on bursts

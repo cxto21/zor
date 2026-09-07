@@ -40,9 +40,9 @@ Chain strategy: pending
 
 ## Phase 3: Integration
 
-- [ ] 3.1 Factory `STARKSCAN_API_KEY`>`PROVING_SERVICE_URL`>mock +mainnet gate. AC: 6 scenarios pass. Deps: 2.1. Size: S. Files: `vault-service.ts`. Verify: `vitest vault-service.test.ts`
-- [ ] 3.2 `prover-on-demand.ts` Starkscan-first before Freestyle. AC: key skips VM; unset no regress. Deps: 3.1. Size: XS. Files: `prover-on-demand.ts`. Verify: stub not called
-- [ ] 3.3 E2E prove→persist→CallAndProof blip resume. AC: once-only; retry same Idempotency-Key. Deps: 2.3,2.4,3.1. Size: S. Files: `starkscan-proof-provider.ts`,`vault-service.ts`. Verify: mock KV+fetch
+- [x] 3.1 Factory `STARKSCAN_API_KEY`>`PROVING_SERVICE_URL`>mock +mainnet gate. AC: 6 scenarios pass. Deps: 2.1. Size: S. Files: `vault-service.ts`. Verify: `vitest vault-service.test.ts`
+- [x] 3.2 `prover-on-demand.ts` Starkscan-first before Freestyle. AC: key skips VM; unset no regress. Deps: 3.1. Size: XS. Files: `prover-on-demand.ts`. Verify: stub not called
+- [x] 3.3 E2E prove→persist→CallAndProof blip resume. AC: once-only; retry same Idempotency-Key. Deps: 2.3,2.4,3.1. Size: S. Files: `starkscan-proof-provider.ts`,`vault-service.ts`. Verify: mock KV+fetch
 
 ## Phase 4: Testing
 

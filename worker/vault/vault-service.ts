@@ -47,6 +47,8 @@ import {
 } from "@starkware-libs/starknet-privacy-sdk/testing";
 import { PrivacyPoolABI } from "@starkware-libs/starknet-privacy-sdk/abi";
 import { generateViewingKey } from "../src/shield-service/viewing-keys";
+import { createStarkscanProviderFromEnv } from "./starkscan-proof-provider";
+import type { StarkscanKvNamespace } from "./starkscan-persistence";
 
 // ============ Constants ============
 
@@ -55,6 +57,11 @@ const POOL_CONTRACT_ADDRESS =
 const STRK_TOKEN_ADDRESS =
   "0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d";
 const CHAIN_ID = constants.StarknetChainId.SN_SEPOLIA;
+const CHAIN_ID_MAIN = constants.StarknetChainId.SN_MAIN;
+
+function isMainnetChainId(chainId: string): boolean {
+  return chainId === CHAIN_ID_MAIN;
+}
 
 // ============ Public Result Types ============
 
@@ -82,6 +89,11 @@ export class VaultService {
       masterAddress: string;
       masterPrivateKey: string;
       provingServiceUrl?: string;
+      starkscanApiKey?: string;
+      starkscanDailyBudget?: string;
+      kv?: StarkscanKvNamespace;
+      chainId?: string;
+      starkscanBaseUrl?: string;
     },
   ) {
     this.provider = new RpcProvider({ nodeUrl: config.rpcUrl });
@@ -104,14 +116,27 @@ export class VaultService {
       providerOrAccount: this.provider,
     }).typedv2(PrivacyPoolABI);
 
-    // Proving provider: real VIRTUAL_SNOS via proving service if configured, else mock for local dev.
-    // Real prover: ghcr.io/starkware-libs/starknet-privacy/transaction-prover:PRIVACY-0.14.3-RC.2
-    // Requires 10-block maturity (provingBlockId = head-10) so blockifier can verify block hash.
-    const provingProvider = config.provingServiceUrl
-      ? new ProvingServiceProofProvider(config.provingServiceUrl, CHAIN_ID)
-      : new CallMockProofProvider(this.provider as unknown as never, CHAIN_ID, {
-          validateSignature: false,
-        });
+    // Proving provider selection: STARKSCAN_API_KEY (mainnet) > PROVING_SERVICE_URL > mock.
+    // Starkscan is mainnet-only — gated by chainId check; Sepolia/test falls through.
+    const chainId = config.chainId ?? CHAIN_ID;
+    let provingProvider: ReturnType<typeof createPrivateTransfers> extends never ? never : unknown = null as unknown;
+    const starkscanKey = config.starkscanApiKey?.trim();
+    if (starkscanKey && isMainnetChainId(chainId) && config.kv) {
+      const p = createStarkscanProviderFromEnv(
+        { STARKSCAN_API_KEY: starkscanKey, STARKSCAN_DAILY_BUDGET: config.starkscanDailyBudget },
+        config.kv,
+        { baseUrl: config.starkscanBaseUrl },
+      );
+      if (p) provingProvider = p as unknown as typeof provingProvider;
+    }
+    if (!provingProvider && config.provingServiceUrl) {
+      provingProvider = new ProvingServiceProofProvider(config.provingServiceUrl, chainId as typeof CHAIN_ID) as unknown as typeof provingProvider;
+    }
+    if (!provingProvider) {
+      provingProvider = new CallMockProofProvider(this.provider as unknown as never, chainId as typeof CHAIN_ID, {
+        validateSignature: false,
+      }) as unknown as typeof provingProvider;
+    }
 
     this.privateTransfers = createPrivateTransfers({
       account,
@@ -202,7 +227,13 @@ export class VaultService {
 
   /** Whether a real proving service is configured (vs mock fallback). */
   isMockProver(): boolean {
-    return !this.config.provingServiceUrl;
+    return !this.config.provingServiceUrl && !this.config.starkscanApiKey?.trim();
+  }
+
+  /** Whether Starkscan is the active provider (mainnet only). */
+  isStarkscanProver(): boolean {
+    const chainId = this.config.chainId ?? CHAIN_ID;
+    return !!this.config.starkscanApiKey?.trim() && isMainnetChainId(chainId) && !!this.config.kv;
   }
 
   /** Expose raw privateTransfers for advanced callers (e.g. verify-private-transfer). */
@@ -218,11 +249,25 @@ export function createVaultService(env: {
   MASTER_ADDRESS: string;
   MASTER_PRIVATE_KEY: string;
   PROVING_SERVICE_URL?: string;
+  STARKSCAN_API_KEY?: string;
+  STARKSCAN_DAILY_BUDGET?: string;
+  CHAIN_ID?: string;
+  SESSIONS?: StarkscanKvNamespace;
+  PROOF_JOBS?: StarkscanKvNamespace;
+  STARKSCAN_BASE_URL?: string;
 }): VaultService {
+  const kv = (env.PROOF_JOBS ?? env.SESSIONS) as StarkscanKvNamespace | undefined;
   return new VaultService({
     rpcUrl: env.STARKNET_RPC_URL,
     masterAddress: env.MASTER_ADDRESS,
     masterPrivateKey: env.MASTER_PRIVATE_KEY,
     provingServiceUrl: env.PROVING_SERVICE_URL,
+    starkscanApiKey: env.STARKSCAN_API_KEY,
+    starkscanDailyBudget: env.STARKSCAN_DAILY_BUDGET,
+    kv,
+    chainId: env.CHAIN_ID,
+    starkscanBaseUrl: env.STARKSCAN_BASE_URL,
   });
 }
+
+export { isMainnetChainId };
