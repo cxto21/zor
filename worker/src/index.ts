@@ -166,7 +166,20 @@ async function rpcCall(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
   });
-  const result: JsonRpcResponse = await response.json();
+  let result: JsonRpcResponse;
+  try {
+    result = await response.json();
+  } catch (e) {
+    // Alchemy and other RPC providers sometimes return plain text errors
+    // instead of JSON. Read the raw body and create a minimal error object.
+    const text = await response.text();
+    result = {
+      error: {
+        message: text || "RPC request failed",
+        code: -32603,
+      },
+    };
+  }
   if (result.error) {
     throw new Error(
       `RPC error: ${result.error.message || JSON.stringify(result.error)}`
